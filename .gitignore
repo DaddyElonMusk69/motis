@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .venv/
 .uv/
+.uv-cache/
 *.egg-info/
 dist/
 build/
@@ -38,3 +39,6 @@ logs/
 *.pem
 *.key
 services/agent/upstream/vibe_trading/.git
+
+# Runtime-generated operators (created by the agent)
+services/agent/motis_agent/operators/user/

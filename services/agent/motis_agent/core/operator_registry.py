@@ -50,7 +50,10 @@ def _is_valid_operator_namespace(ns: dict) -> bool:
 
 def _load_module_from_path(filepath: Path) -> ModuleType | None:
     """Import a Python module from an absolute path without polluting sys.modules permanently."""
-    module_name = f"motis_agent.operators.operators.{filepath.stem}"
+    # Derive module name from folder structure: operators/<category>/<name>/operator.py
+    op_dir_name = filepath.parent.name
+    category_name = filepath.parent.parent.name
+    module_name = f"motis_agent.operators.{category_name}.{op_dir_name}.operator"
     try:
         spec = importlib.util.spec_from_file_location(module_name, filepath)
         if spec is None or spec.loader is None:
@@ -153,10 +156,17 @@ class OperatorRegistry:
 
     def _load_from_filesystem(self) -> None:
         """
-        Scan the operators directory for Python modules that export the
-        operator contract (STATE, MANIFEST, build_graph).
+        Scan the operators directory for operator folders.
 
-        Skips files starting with ``_`` (private / __init__).
+        Convention: each operator is a folder containing ``operator.py``
+        that exports the contract (STATE, MANIFEST, build_graph).
+
+        Scans three subdirectories:
+          - examples/  — reference implementations
+          - builtin/   — production-ready (ported from vibe trading)
+          - user/      — agent-generated at runtime
+
+        Skips folders starting with ``_`` or ``.``.
         """
         if not self.operators_path:
             logger.debug("No operators_path configured — skipping filesystem load")
@@ -170,29 +180,46 @@ class OperatorRegistry:
             operators_dir.mkdir(parents=True, exist_ok=True)
             return
 
-        for filepath in sorted(operators_dir.glob("*.py")):
-            if filepath.stem.startswith("_"):
+        # Scan each category subdirectory
+        for category in ("examples", "builtin", "user"):
+            category_dir = operators_dir / category
+            if not category_dir.is_dir():
                 continue
 
-            module = _load_module_from_path(filepath)
-            if module is None:
-                continue
+            for op_dir in sorted(category_dir.iterdir()):
+                if not op_dir.is_dir():
+                    continue
+                if op_dir.name.startswith(("_", ".")):
+                    continue
 
-            if not _is_valid_operator_module(module):
-                logger.warning(
-                    "Skipping %s — missing operator contract (STATE, MANIFEST, build_graph)",
-                    filepath.name,
+                entry_point = op_dir / "operator.py"
+                if not entry_point.exists():
+                    logger.debug("Skipping %s — no operator.py", op_dir.name)
+                    continue
+
+                module = _load_module_from_path(entry_point)
+                if module is None:
+                    continue
+
+                if not _is_valid_operator_module(module):
+                    logger.warning(
+                        "Skipping %s/%s — missing operator contract (STATE, MANIFEST, build_graph)",
+                        category,
+                        op_dir.name,
+                    )
+                    continue
+
+                manifest = module.MANIFEST
+                op_name = manifest.get("name", op_dir.name)
+                op_id = f"{category}-{op_dir.name}"
+
+                self._operators[op_id] = _LoadedOperator(
+                    module=module, operator_id=op_id, source="filesystem"
                 )
-                continue
-
-            manifest = module.MANIFEST
-            op_name = manifest.get("name", filepath.stem)
-            op_id = f"dev-{filepath.stem}"
-
-            self._operators[op_id] = _LoadedOperator(
-                module=module, operator_id=op_id, source="filesystem"
-            )
-            logger.info("Loaded operator: %s (%s) from %s", op_name, op_id, filepath.name)
+                logger.info(
+                    "Loaded operator: %s (%s) from %s/%s/operator.py",
+                    op_name, op_id, category, op_dir.name,
+                )
 
     # ── Public API (used by OperatorService + system prompt) ──────────────────
 
@@ -242,7 +269,7 @@ class OperatorRegistry:
         return await self._db_get_logs(str(operator_id), limit=limit)
 
     async def create(self, spec: dict) -> UUID:
-        """Create a new operator. In dev mode, writes a .py file to the operators directory."""
+        """Create a new operator. In dev mode, creates a folder with operator.py."""
         if self.runtime_mode in ("dev", "standalone"):
             return await self._fs_create(spec)
         return await self._db_create(spec)
@@ -304,7 +331,10 @@ class OperatorRegistry:
     # ── Filesystem create ─────────────────────────────────────────────────────
 
     async def _fs_create(self, spec: dict) -> UUID:
-        """Write a new operator as a .py file in the operators directory."""
+        """
+        Create a new operator as a folder with operator.py in the user/ subdirectory.
+        Agent-generated operators always go to operators/user/<name>/operator.py.
+        """
         op_id = uuid4()
         graph_code = spec.get("graph_code", "")
         if not graph_code:
@@ -312,18 +342,19 @@ class OperatorRegistry:
             name = spec.get("name", "Untitled")
             graph_code = f'"""\n{name}\nGenerated by Motis agent. Edit to implement.\n"""\n\nSTATE = dict\nMANIFEST = {{"name": "{name}", "type": "{spec.get("type", "paper_trade")}"}}\n\ndef build_graph():\n    raise NotImplementedError("Operator not implemented yet")\n'
 
-        op_dir = Path(self.operators_path)
-        op_dir.mkdir(parents=True, exist_ok=True)
-
-        # Sanitize name to a valid Python filename
+        # Sanitize name to a valid directory name
         safe_name = spec.get("name", "untitled").lower().replace(" ", "_").replace("-", "_")
         safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
-        filepath = op_dir / f"{safe_name}.py"
 
+        # Agent-generated operators go to user/
+        op_dir = Path(self.operators_path) / "user" / safe_name
+        op_dir.mkdir(parents=True, exist_ok=True)
+
+        filepath = op_dir / "operator.py"
         filepath.write_text(graph_code, encoding="utf-8")
-        logger.info("Created operator file: %s", filepath)
+        logger.info("Created operator: %s", filepath)
 
-        # Reload registry to pick up the new file
+        # Reload registry to pick up the new operator
         self._operators = None
         self._ensure_loaded()
 

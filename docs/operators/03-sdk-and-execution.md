@@ -11,7 +11,7 @@ Motis MCP servers rather than talking to exchanges or data sources directly. Thi
 ### SDK functions and their backends
 
 ```python
-from motis_operator.sdk import call_skill, reason_call, submit_order, log_event
+from motis_operator.sdk import call_skill, reason_call, run_agent, submit_order, log_event
 ```
 
 | SDK Function | What it does | Platform backend | Standalone backend |
@@ -20,7 +20,8 @@ from motis_operator.sdk import call_skill, reason_call, submit_order, log_event
 | `call_skill("research.macro", {...})` | External research APIs | **MCP** → `finance.research.macro` tool | Direct API calls |
 | `call_skill("smc.structure", {...})` | Pure compute (no I/O) | **In-process** — no MCP round-trip | In-process (same) |
 | `call_skill("technical.indicators", {...})` | Pure compute | **In-process** | In-process (same) |
-| `reason_call(prompt, ...)` | LLM call for REASON nodes | Platform model config / BYOM | Local API key |
+| `reason_call(prompt, ...)` | Single LLM call for REASON nodes | Platform model config / BYOM | Local API key |
+| `run_agent(agent_id, context)` | Spawn scoped sub-agent loop | New agent instance with scoped tools/skills | Same (local) |
 | `submit_order(symbol, side, ...)` | Place exchange order | **MCP** → `execute_live_trade` tool | Direct exchange SDK |
 | `cancel_order(order_id)` | Cancel order | **MCP** → `cancel_order` tool | Direct exchange SDK |
 | `get_positions()` | Read open positions | **MCP** → `get_positions` tool | Direct exchange SDK |
@@ -32,6 +33,49 @@ from motis_operator.sdk import call_skill, reason_call, submit_order, log_event
 I/O skills (data.*, research.*)  → MCP on platform, direct calls standalone
 Pure compute (smc.*, technical.*) → always in-process (no reason to round-trip)
 Execution (submit_order, etc.)    → always MCP on platform, direct SDK standalone
+Agent loops (run_agent)           → new scoped agent instance (same in all modes)
+```
+
+### `run_agent()` — spawning scoped sub-agents
+
+For REASON nodes that need multi-step work (data fetching, analysis, report writing),
+`run_agent()` spawns a new, lightweight agent instance:
+
+```python
+async def run_agent(
+    agent_id: str,         # References MANIFEST["agents"][agent_id]
+    context: dict,         # State fields to pass as context
+    *,
+    output_key: str = "summary",  # Which field of the result to return
+) -> AgentResult:
+    """
+    Spawn a scoped sub-agent from the MANIFEST agents config.
+
+    The sub-agent gets:
+    - Its own system_prompt (from MANIFEST)
+    - Only the tools listed in its config (scoped whitelist)
+    - Only the skills listed in its config (scoped whitelist)
+    - The user's model config (or per-agent override if model_name is set)
+    - Its own iteration limit (from config, default 25)
+
+    It does NOT get:
+    - The master agent's conversation history
+    - The master agent's system prompt
+    - Access to other operators or operator tools
+    """
+```
+
+Example usage in a node:
+
+```python
+async def funding_analysis(state: State) -> dict:
+    """REASON: Full agent analysis of funding rates."""
+    result = await run_agent("funding_analyst", {
+        "target": state["target"],
+        "timeframe": state["timeframe"],
+    })
+    log_event("funding_analysis", f"Completed: {len(result.summary)} chars")
+    return {"funding_summary": result.summary}
 ```
 
 ### How it works under the hood
@@ -389,6 +433,22 @@ DATA → COMPUTE → REASON ──[no signal]──→ END
 ### 4. Research Pipeline (no execution)
 ```
 DATA → COMPUTE → REASON → REPORT(save to memory)
+```
+
+### 5. Multi-Agent Research Team (from swarm presets)
+```
+                    ┌─ REASON(analyst_1) ─┐
+DATA(fetch_meta) ──┼─ REASON(analyst_2) ─┼─ REASON(synthesizer) → END
+                    └─ REASON(analyst_3) ─┘
+```
+
+Each REASON node uses `run_agent()` to spawn an independent agent loop.
+The analysts run in parallel (LangGraph fan-out), the synthesizer
+waits for all of them (fan-in) and produces the final report.
+
+For trading-oriented teams, extend with:
+```
+... → REASON(synthesizer) → COMPUTE(sizing) → GUARD → EXECUTE
 ```
 
 ---

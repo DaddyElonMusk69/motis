@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from motis_agent.core.session_search import SessionSearchService
     from motis_agent.core.session_store import SessionStore
     from motis_agent.core.skills import SkillRegistry
-    from motis_agent.operators.registry import OperatorRegistry
+    from motis_agent.core.operator_registry import OperatorRegistry
 
 
 @dataclass
@@ -73,7 +73,7 @@ class UserContext:
         from motis_agent.core.session_store import SessionStore
         from motis_agent.core.skills import SkillRegistry
         from motis_agent.settings import settings as _settings
-        from motis_agent.operators.registry import OperatorRegistry
+        from motis_agent.core.operator_registry import OperatorRegistry
 
         self.memory = MemoryStore(user_id=self.user_id)
         self.memory_manager = MemoryManager(

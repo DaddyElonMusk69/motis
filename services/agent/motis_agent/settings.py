@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # ── Runtime mode ───────────────────────────────────────────────────────────
     # Controls where operators and skills are loaded from.
     # See: docs/operators/05-configuration-guide.md
-    #   dev        → filesystem (services/agent/motis_agent/operators/operators/)
+    #   dev        → filesystem (services/agent/motis_agent/operators/)
     #   platform   → PostgreSQL (multi-user, per user_id)
     #   standalone → filesystem (~/.motis/operators/)
     runtime_mode: str = "dev"
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
             if self.runtime_mode == "dev":
                 # Resolve relative to the project root (heuristic: walk up from this file)
                 project_root = Path(__file__).resolve().parents[3]  # services/agent/motis_agent/ → project root
-                self.operators_path = str(project_root / "services" / "agent" / "motis_agent" / "operators" / "operators")
+                self.operators_path = str(project_root / "services" / "agent" / "motis_agent" / "operators")
             elif self.runtime_mode == "standalone":
                 self.operators_path = str(Path.home() / ".motis" / "operators")
 

@@ -10,11 +10,36 @@
 > - [02-contract-and-validation.md](../../../docs/operators/02-contract-and-validation.md)
 > - [03-sdk-and-execution.md](../../../docs/operators/03-sdk-and-execution.md)
 
+## Operator Directory Convention
+
+Each operator lives in its own folder under `motis_agent/operators/`:
+
+```
+operators/
+├── examples/           # Reference implementations (for learning)
+│   └── btc_smc_long/
+│       └── operator.py
+├── builtin/            # Production-ready (ported from vibe trading swarms)
+│   └── smc_swing/
+│       ├── operator.py
+│       └── prompts/    # Optional: hot-patchable prompt templates
+└── user/               # Agent-generated operators (created via operator_create)
+    └── my_strategy/
+        └── operator.py
+```
+
+**Rules:**
+- Entry point is always `operator.py` in the folder root
+- Agent-created operators always go to `operators/user/<name>/operator.py`
+- Builtin operators are pre-built and version-controlled
+- Each folder can also contain: `prompts/`, `config.yaml`, `tests/`
+- Operator IDs follow the pattern: `<category>-<folder_name>` (e.g., `examples-btc_smc_long`)
+
 ---
 
 ## The Operator Contract
 
-Every operator is a **single Python module** that exports exactly three things:
+Every operator's `operator.py` exports exactly three things:
 
 ```python
 from typing_extensions import TypedDict
@@ -75,14 +100,15 @@ Classify **every step** in the strategy as one of these:
 |---|---|---|
 | **DATA** | I/O | Fetches external data. MUST wrap in try/except. On failure → `should_exit = True`. |
 | **COMPUTE** | Pure function | Deterministic math. NO LLM calls. Reads state, returns computed values. |
-| **REASON** | LLM call | Uses `reason_call()` with a prompt from MANIFEST. Hot-patchable. |
+| **REASON** | LLM call or agent loop | **Single-call**: `reason_call()` for quick decisions. **Agent-loop**: `run_agent()` for multi-step research. |
 | **GUARD** | Deterministic | Checks risk limits from MANIFEST. Returns `guard_approved` bool. NEVER uses LLM. |
 | **EXECUTE** | I/O | Calls `submit_order()`. MUST include `sl=` parameter. Only runs if guard approved. |
 
 ### Classification rules (use these exactly):
 - "If it fetches external data → **DATA**"
 - "If it's pure math on state → **COMPUTE**"
-- "If it needs judgment or interpretation → **REASON**"
+- "If it needs a quick structured decision → **REASON** (single-call with `reason_call()`)"
+- "If it needs multi-step research with tools → **REASON** (agent-loop with `run_agent()`)"
 - "If it checks limits or thresholds → **GUARD**"
 - "If it places or modifies orders → **EXECUTE**"
 
@@ -90,16 +116,24 @@ Classify **every step** in the strategy as one of these:
 
 ## The SDK Surface
 
-Four functions available in every node:
+Five functions available in every node:
 
 ```python
-from motis_operator.sdk import call_skill, reason_call, submit_order, log_event
+from motis_operator.sdk import call_skill, reason_call, run_agent, submit_order, log_event
 
 # DATA/COMPUTE nodes: fetch data or run skills
 ohlcv = await call_skill("data.ohlcv", {"symbol": "BTC/USDT:USDT", "interval": "4h", "limit": 300})
 
-# REASON nodes: LLM call with structured output
+# REASON nodes (single-call): LLM call with structured output
 signal = await reason_call(prompt="...", response_format={"type": "json_object"})
+
+# REASON nodes (agent-loop): spawn scoped sub-agent for multi-step work
+result = await run_agent("funding_analyst", {
+    "target": state["target"],
+    "timeframe": state["timeframe"],
+})
+# result.summary — the agent's output text
+# result.artifacts — any files the agent produced
 
 # EXECUTE nodes: place orders (MUST include sl=)
 order = await submit_order(
@@ -113,6 +147,42 @@ order = await submit_order(
 
 # ALL nodes: structured logging for observability
 log_event("node_name", "Human-readable message", data={"key": "value"})
+```
+
+### `run_agent()` — when to use it
+
+- Use `reason_call()` when you need a **single structured decision** (e.g., "long or flat?")
+- Use `run_agent()` when the node needs to **do real work** — fetch data, run tools, write reports
+
+`run_agent(agent_id, context)` looks up `MANIFEST["agents"][agent_id]` and spawns
+a new, lightweight agent instance with:
+- Its own system prompt, tool whitelist, skill whitelist
+- The user's model (or a per-agent model override)
+- Its own iteration limit (not the master agent's loop)
+
+The spawned agent does NOT inherit the master agent's memory or conversation.
+
+### MANIFEST `agents` section
+
+When using `run_agent()`, declare agents in the MANIFEST:
+
+```python
+MANIFEST = {
+    ...
+    "agents": {
+        "funding_analyst": {
+            "role": "Funding Rate & Basis Analyst",
+            "system_prompt": "You are a senior derivatives analyst...",
+            "tools": ["bash", "read_file", "load_skill"],
+            "skills": ["perp-funding-basis", "okx-market"],
+            "max_iterations": 50,
+            "model_name": None,  # None = user's default model
+        },
+    },
+    "nodes": [
+        {"name": "funding_analysis", "type": "REASON", "agent": "funding_analyst"},
+    ],
+}
 ```
 
 ---
@@ -149,10 +219,12 @@ Before an operator can graduate from `draft` → `paper`, these 5 MUST pass:
 ```
 1. Every step in the strategy
 2. Each step's node type (DATA / COMPUTE / REASON / GUARD / EXECUTE)
-3. What state fields each step reads
-4. What state fields each step writes
-5. Where errors can occur and how they're handled
-6. What the GUARD nodes check
+3. For REASON nodes: single-call (reason_call) or agent-loop (run_agent)?
+4. If agent-loop: what tools and skills does this agent need?
+5. What state fields each step reads
+6. What state fields each step writes
+7. Where errors can occur and how they're handled
+8. What the GUARD nodes check
 ```
 
 Show this decomposition to the user and get approval before generating code.
@@ -161,7 +233,7 @@ Show this decomposition to the user and get approval before generating code.
 
 ## Canonical Graph Shapes
 
-### 1. Linear Pipeline (80% of strategies)
+### 1. Linear Pipeline (80% of single-agent strategies)
 ```
 DATA → COMPUTE → REASON → COMPUTE(sizing) → GUARD → EXECUTE
 ```
@@ -186,6 +258,25 @@ DATA → COMPUTE → REASON ──[no signal]──→ END
 ```
 DATA → COMPUTE → REASON → REPORT(save to memory)
 ```
+
+### 5. Multi-Agent Research Team (from swarm presets)
+```
+                    ┌─ REASON(analyst₁) ─┐
+DATA(fetch_meta) ──┼─ REASON(analyst₂) ─┼─ REASON(synthesizer) → END
+                    └─ REASON(analyst₃) ─┘
+```
+Each REASON node uses `run_agent()` to spawn an independent agent loop.
+The analysts run in parallel (LangGraph fan-out), the synthesizer waits
+for all (fan-in) and produces the final report.
+
+### 6. Multi-Agent Trading Desk (research + execution)
+```
+                    ┌─ REASON(analyst₁) ─┐
+DATA(fetch_meta) ──┼─ REASON(analyst₂) ─┼─ REASON(synthesizer) → COMPUTE(sizing) → GUARD → EXECUTE
+                    └─ REASON(analyst₃) ─┘
+```
+Extends shape 5 — the synthesizer's output feeds into position sizing,
+risk gating, and order execution.
 
 ---
 

@@ -21,6 +21,7 @@ Suggested branch names:
 Before opening a PR, run the checks that apply to your change:
 
 ```bash
+./scripts/bootstrap-python.sh
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy packages/shared/motis_shared

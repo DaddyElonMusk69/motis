@@ -2,23 +2,60 @@
 
 ## The Operator Contract
 
-Every operator is a single Python module. It must export exactly three things:
+Every operator is a folder containing an `operator.py` entry point that exports exactly three things:
 
 ```python
 STATE: type              # TypedDict defining the state schema
-MANIFEST: dict           # Metadata: name, triggers, risk config, node types
+MANIFEST: dict           # Metadata: name, triggers, risk config, node types, agents
 def build_graph() -> CompiledStateGraph:  # Returns the executable graph
     ...
 ```
 
 ### Why a flat module?
 
-- The agent generates a self-contained `.py` string — no class hierarchies
+- The agent generates a self-contained `operator.py` — no class hierarchies
 - LangGraph tutorials are module-level — this is the pattern LLMs have seen most
 - `exec()` in the runtime → extract the 3 exports → done
 - The existing `OperatorBase` class stays for hand-coded developer operators
 
 Both paths produce the same thing: a compiled graph + state + manifest.
+
+### The MANIFEST `agents` section (optional)
+
+For operators that need multi-step agent reasoning (e.g., research teams, trading desks),
+MANIFEST can declare named agents. Each agent gets its own system prompt, tool whitelist,
+skill whitelist, and iteration limit:
+
+```python
+MANIFEST = {
+    "name": "Crypto Trading Desk",
+    "type": "research",
+    "agents": {
+        "funding_analyst": {
+            "role": "Funding Rate & Basis Analyst",
+            "system_prompt": "You are a senior derivatives analyst...",
+            "tools": ["bash", "read_file", "load_skill"],
+            "skills": ["perp-funding-basis", "okx-market"],
+            "max_iterations": 50,
+            "model_name": None,  # None = use user's default model
+        },
+        "risk_manager": {
+            "role": "Desk Risk Manager",
+            "system_prompt": "You are the head risk manager...",
+            "tools": ["bash", "read_file", "write_file", "load_skill"],
+            "skills": ["risk-analysis", "asset-allocation"],
+        },
+    },
+    "nodes": [
+        {"name": "fetch_meta",       "type": "DATA"},
+        {"name": "funding_analysis", "type": "REASON", "agent": "funding_analyst"},
+        {"name": "risk_synthesis",   "type": "REASON", "agent": "risk_manager"},
+    ],
+}
+```
+
+When a REASON node references an `"agent"` key, it spawns a **new, scoped agent instance**
+(not the master agent). That agent runs a full ReAct loop with the specified tools and skills.
 
 ---
 
@@ -31,9 +68,16 @@ during decomposition:
 |---|---|---|---|
 | **DATA** | I/O | Fetch OHLCV, orderbook, funding rates, news | N/A |
 | **COMPUTE** | Pure function | Indicators, patterns, position sizing, SL/TP calc | N/A |
-| **REASON** | LLM call | Interpret data, decide entry/exit, analyze context | Prompt author |
+| **REASON** | LLM call or agent loop | Interpret data, decide entry/exit, deep research | Prompt author |
 | **GUARD** | Deterministic | Position limits, daily loss check, leverage cap, cooldown | **The operator itself** |
 | **EXECUTE** | I/O | Submit orders, set SL/TP, cancel orders | MCP layer |
+
+#### REASON nodes: two modes
+
+- **Single-call** — `reason_call(prompt, ...)` for quick structured decisions ("long or flat?")
+- **Agent-loop** — `run_agent(agent_id, context)` for multi-step work (fetch data, analyze,
+  write report). References an agent declared in `MANIFEST["agents"]`. Each spawned agent
+  gets its own scoped tool/skill whitelist and runs independently of the master agent.
 
 ### The critical difference from v1
 
