@@ -95,6 +95,12 @@ async def motis_delegate_task(
             })
         else:
             structured.append(result)
+            if result.get("summary"):
+                await ctx.memory_manager.on_delegation(
+                    task=task_list[i]["goal"],
+                    result=result["summary"],
+                    child_session_id=f"{ctx.conversation_id}:{i}",
+                )
 
     total_duration = round(time.monotonic() - overall_start, 2)
     return {

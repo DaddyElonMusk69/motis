@@ -8,6 +8,8 @@ from fastapi import Header, HTTPException
 
 if TYPE_CHECKING:
     from motis_agent.core.memory import MemoryStore
+    from motis_agent.core.memory_manager import MemoryManager
+    from motis_agent.core.operators import OperatorService
     from motis_agent.core.skills import SkillRegistry
     from motis_operator.registry import OperatorRegistry
 
@@ -48,20 +50,29 @@ class UserContext:
 
     # Lazy-initialised by __post_init__ — never set directly
     memory: "MemoryStore" = field(init=False)
+    memory_manager: "MemoryManager" = field(init=False)
     skill_registry: "SkillRegistry" = field(init=False)
     operator_registry: "OperatorRegistry" = field(init=False)
+    operator_service: "OperatorService" = field(init=False)
 
     # Populated lazily — cached after first DB check
     _has_connected_exchange: Optional[bool] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         from motis_agent.core.memory import MemoryStore
+        from motis_agent.core.memory_manager import MemoryManager
+        from motis_agent.core.memory_providers import PostgresMemoryProvider
+        from motis_agent.core.operators import OperatorService
         from motis_agent.core.skills import SkillRegistry
         from motis_operator.registry import OperatorRegistry
 
         self.memory = MemoryStore(user_id=self.user_id)
+        self.memory_manager = MemoryManager(
+            providers=[PostgresMemoryProvider(self.memory)]
+        )
         self.skill_registry = SkillRegistry(user_id=self.user_id)
         self.operator_registry = OperatorRegistry(user_id=self.user_id)
+        self.operator_service = OperatorService(self.operator_registry)
 
     @property
     def has_connected_exchange(self) -> bool:
@@ -133,4 +144,3 @@ async def get_user_context(
         model_config=model_config,
         conversation_id=conversation_id,
     )
-

@@ -196,7 +196,7 @@ Idea ──► Research ──► Backtest ──► Paper Trade ──► Live 
 | Tool | Source | Purpose |
 |---|---|---|
 | `finance.*` (68 skills) | Vibe-Trading (absorbed) | Data, SMC analysis, technical indicators, reporting |
-| `operator_*` | Motis MCP | CRUD + invoke operators (create, list, status, archive) |
+| `operator_*` | Motis operator layer | CRUD + invoke operators (create, list, status, archive) |
 | `execute_paper_trade`, `execute_live_trade` | Motis MCP | Trading execution (risk guard enforced at MCP layer) |
 | `web_search`, `web_fetch` | Hermes `web_tools.py` | Research, news, financial reports, SEC filings |
 | `terminal` (sandboxed) | Hermes `terminal_tool.py` | Run Python analysis scripts in isolated container |
@@ -574,7 +574,7 @@ Motis runs two fundamentally different workloads simultaneously:
 │                                      │ MCP                           │
 │               ┌──────────────────────▼──────────────────────┐       │
 │               │           Motis MCP Server                    │       │
-│               │  Trading Exec (risk guard) · Operator CRUD    │       │
+│               │  Trading Exec (risk guard) only               │       │
 │               └──────────────────────────────────────────────┘       │
 │                                                                      │
 │  ═══════════════════ OPERATOR LAYER (event-driven) ════════════════  │
@@ -648,10 +648,10 @@ Motis runs two fundamentally different workloads simultaneously:
 - API keys decrypted and injected here only — never visible in operator code or Temporal workflow history
 
 #### Motis MCP Server
-- Exposes execution and operator tools to the Agent Service:
+- Exposes remote execution tools to the Agent Service:
   - `market_data_*` — thin wrappers; heavy data logic lives as native skills in the Agent Service
   - `execute_paper_trade`, `execute_live_trade`, `get_positions` — trading execution (platform risk guard enforced here)
-  - `operator_*` — CRUD for operators (create, list, invoke, get status, update, archive)
+- Operator CRUD/invocation is a Motis operator-layer concern, not an MCP concern
 - Research, backtest, data routing, and swarms are **NOT** MCP tools — native skills called in-process by the agent loop
 - Platform risk guard is the last line of defense before any order reaches the Exchange Gateway
 

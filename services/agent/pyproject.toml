@@ -28,10 +28,17 @@ dependencies = [
     "scipy>=1.13",
     # MCP client
     "mcp>=1.0",
+    # OpenAI client (for MotisAgentLoop model calls)
+    "openai>=1.30",
 ]
+
+[project.optional-dependencies]
+# CLI mode: pretty terminal output (optional — degrades gracefully without)
+cli = ["rich>=13.7"]
 
 [project.scripts]
 motis-agent = "motis_agent.server:main"
+motis-chat  = "motis_agent.cli:main"
 
 [build-system]
 requires = ["hatchling"]

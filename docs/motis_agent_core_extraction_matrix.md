@@ -26,6 +26,22 @@ Completed in this repo state:
 - Switched [loop.py](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/core/loop.py) to depend on `SkillRegistry` instead of importing finance tool definitions directly
 - Quarantined the upstream-derived non-runtime carry-overs in [\_upstream_quarantine](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/_upstream_quarantine)
 
+## Current Phase 2 Foundation
+
+Completed in this repo state:
+
+- Added a Motis-owned async memory abstraction:
+  - [memory_provider.py](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/core/memory_provider.py)
+  - [memory_manager.py](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/core/memory_manager.py)
+  - [memory_providers/postgres.py](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/core/memory_providers/postgres.py)
+- Wired the live agent runtime to use `MemoryManager` for:
+  - provider-owned memory tool definitions
+  - per-turn memory prefetch
+  - memory tool routing
+  - delegation hook surfaces
+- Kept [memory.py](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/core/memory.py) as the storage implementation and wrapped it instead of copying upstream storage behavior
+- Removed the operator registry's hidden dependency on `motis_platform` so the agent service can construct [UserContext](/Users/haokaiqin/Desktop/RR%20Ratio/Motis/services/agent/motis_agent/context.py) without importing the full platform package
+
 ## Extraction Matrix
 
 ### 1. `run_agent.py`

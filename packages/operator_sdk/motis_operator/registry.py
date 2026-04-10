@@ -15,15 +15,37 @@ Provides:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from motis_platform.db.session import async_session
 from motis_shared.types import OperatorState
 
 logger = logging.getLogger(__name__)
+
+
+_DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+asyncpg://motis:motis@localhost:5432/motis",
+)
+
+_engine = create_async_engine(
+    _DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    echo=False,
+)
+
+async_session: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    _engine,
+    expire_on_commit=False,
+    autoflush=False,
+)
 
 
 class OperatorRegistry:
@@ -87,6 +109,28 @@ class OperatorRegistry:
                     LIMIT :limit
                 """),
                 params,
+            )
+            return [dict(row._mapping) for row in result.fetchall()]
+
+    async def get_recent_logs(self, operator_id: UUID, *, limit: int = 20) -> list[dict]:
+        """Return recent persisted run logs for a specific operator."""
+        async with async_session() as session:
+            result = await session.execute(
+                text("""
+                    SELECT id, operator_id, node_name, level, message, data, created_at
+                    FROM operator_run_logs
+                    WHERE operator_id = :operator_id
+                      AND operator_id IN (
+                          SELECT id FROM operators WHERE id = :operator_id AND user_id = :user_id
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                """),
+                {
+                    "operator_id": str(operator_id),
+                    "user_id": str(self.user_id),
+                    "limit": limit,
+                },
             )
             return [dict(row._mapping) for row in result.fetchall()]
 

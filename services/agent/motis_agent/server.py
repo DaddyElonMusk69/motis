@@ -223,13 +223,14 @@ async def get_operator_state(
     ctx: UserContext = Depends(get_user_context),
 ) -> dict:
     """
-    Returns the current LangGraph state snapshot for a running operator.
-    Called by the platform's operator runtime worker to stream state to the frontend.
+    Returns the best currently available operator-layer state view.
+    Until runtime checkpoint retrieval is wired, this returns persisted
+    operator metadata plus recent run logs for the frontend.
     """
-    op = await ctx.operator_registry.get(operator_id)
-    if not op:
+    try:
+        return await ctx.operator_service.runtime_state(operator_id=operator_id)
+    except ValueError:
         raise HTTPException(status_code=404, detail="Operator not found")
-    return await op.get_state()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

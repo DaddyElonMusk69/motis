@@ -58,19 +58,18 @@ def _build_tool_definitions(ctx: UserContext) -> list[dict]:
     Build the OpenAI tool_choice definitions list for this user's session.
 
     Order matters for model attention — put high-priority tools first.
-    Finance skills are exposed as individual tools (auto-discovered from
-    the skill registry). MCP tools (operator_*, execute_*) are included
-    when the user has at least one connected exchange.
+    Finance skills and operator tools are exposed as local Motis primitives.
+    Only remote execution tools stay behind the MCP boundary.
     """
     from motis_agent.tools._registry import get_tool_definitions
 
     tools = []
 
+    # Provider-owned memory tools come from the memory manager.
+    tools.extend(ctx.memory_manager.get_all_tool_definitions())
+
     # Core agent tools (always available)
     tools.extend(get_tool_definitions([
-        "memory_add",
-        "memory_search",
-        "memory_recall",
         "web_search",
         "web_fetch",
         "delegate_task",
@@ -83,7 +82,7 @@ def _build_tool_definitions(ctx: UserContext) -> list[dict]:
     # Callable domain skills (currently finance-only, via SkillRegistry)
     tools.extend(ctx.skill_registry.get_tool_definitions())
 
-    # MCP operator tools — always included (user may not have operators yet, that's fine)
+    # Local operator tools — always included (user may not have operators yet, that's fine)
     tools.extend(get_tool_definitions([
         "operator_create",
         "operator_list",
@@ -143,6 +142,7 @@ class MotisAgentLoop:
 
         # Load user memory into system prompt context
         self._system_prompt: str | None = None  # built lazily on first call
+        self._turn_memory_context: str = ""
 
     # ── System prompt ─────────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ class MotisAgentLoop:
         - Platform hints (web SSE, no filesystem)
         """
         from motis_agent.core.prompts import build_motis_system_prompt
-        memory_ctx = await self.ctx.memory.get_context_block()
+        memory_ctx = await self.ctx.memory_manager.build_system_prompt()
         operator_ctx = await self.ctx.operator_registry.get_context_block()
         return build_motis_system_prompt(
             user_ctx=self.ctx,
@@ -187,6 +187,10 @@ class MotisAgentLoop:
         # Build system prompt on first turn
         if self._system_prompt is None:
             self._system_prompt = await self._build_system_prompt()
+        self._turn_memory_context = await self.ctx.memory_manager.build_prefetch_context(
+            user_message,
+            conversation_id=self.ctx.conversation_id,
+        )
 
         # Append user message
         self._messages.append({"role": "user", "content": user_message})
@@ -194,6 +198,13 @@ class MotisAgentLoop:
         turns = 0
         while turns < self.MAX_TURNS:
             turns += 1
+            await self.ctx.memory_manager.on_turn_start(
+                turns,
+                user_message,
+                conversation_id=self.ctx.conversation_id,
+                model=self.model,
+                tool_count=len(self._tools),
+            )
 
             # ── LLM call ──────────────────────────────────────────────────────
             try:
@@ -213,6 +224,15 @@ class MotisAgentLoop:
                     "role": "assistant",
                     "content": response_text or "",
                 })
+                await self.ctx.memory_manager.sync_all(
+                    user_message,
+                    response_text or "",
+                    conversation_id=self.ctx.conversation_id,
+                )
+                await self.ctx.memory_manager.queue_prefetch_all(
+                    user_message,
+                    conversation_id=self.ctx.conversation_id,
+                )
                 # Persist memory snippets from this turn
                 await self._maybe_save_memory(response_text)
                 yield _event("message_end", stop_reason=stop_reason)
@@ -247,10 +267,7 @@ class MotisAgentLoop:
         """
         response = await self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": self._system_prompt},
-                *self._messages,
-            ],
+            messages=self._build_model_messages(),
             tools=self._tools,
             tool_choice="auto",
         )
@@ -267,6 +284,20 @@ class MotisAgentLoop:
             tool_calls = choice.message.tool_calls
 
         return response_text, tool_calls, stop_reason
+
+    def _build_model_messages(self) -> list[dict[str, Any]]:
+        """
+        Assemble the model input messages for the current turn.
+        Query-specific recalled memory is injected as a separate system message
+        so it stays distinct from the base prompt and from user content.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._system_prompt},
+        ]
+        if self._turn_memory_context:
+            messages.append({"role": "system", "content": self._turn_memory_context})
+        messages.extend(self._messages)
+        return messages
 
     # ── Tool execution ────────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ Dispatches tool calls from MotisAgentLoop to the appropriate handler.
 Two dispatch paths:
 1. Native tools (finance skills, memory, web, terminal, subagent, moa)
    → imported and called directly in-process
-2. MCP tools (operator_*, execute_*, get_positions)
+2. Remote execution tools (execute_*, get_positions)
    → forwarded via HTTP to the Motis MCP server
 
 Adapted from Hermes model_tools.py:handle_function_call()
@@ -26,12 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Tools dispatched via MCP HTTP (services/mcp)
 _MCP_TOOLS = frozenset({
-    "operator_create",
-    "operator_list",
-    "operator_invoke",
-    "operator_status",
-    "operator_pause",
-    "operator_archive",
     "execute_paper_trade",
     "execute_live_trade",
     "get_positions",
@@ -74,8 +68,8 @@ class MotisToolRouter:
     async def _dispatch_mcp(self, tool_name: str, args: dict) -> Any:
         """
         Forward tool call to the Motis MCP HTTP server.
-        Injects user context headers so the MCP layer can enforce risk guards
-        and inject the correct exchange API keys.
+        Injects user context headers so the remote execution layer can enforce
+        risk guards and inject the correct exchange API keys.
         """
         import httpx
         from motis_agent.settings import settings
@@ -108,6 +102,20 @@ class MotisToolRouter:
         if tool_name == "memory_recall":
             return await self._handle_memory_recall(args)
 
+        # Operator tools live in Motis locally, not in the remote MCP boundary.
+        if tool_name == "operator_create":
+            return await self._handle_operator_create(args)
+        if tool_name == "operator_list":
+            return await self._handle_operator_list(args)
+        if tool_name == "operator_invoke":
+            return await self._handle_operator_invoke(args)
+        if tool_name == "operator_status":
+            return await self._handle_operator_status(args)
+        if tool_name == "operator_pause":
+            return await self._handle_operator_pause(args)
+        if tool_name == "operator_archive":
+            return await self._handle_operator_archive(args)
+
         # Web tools (adapted from Hermes tools/web_tools.py)
         if tool_name == "web_search":
             return await self._handle_web_search(args)
@@ -135,21 +143,57 @@ class MotisToolRouter:
     # ── Memory handlers ───────────────────────────────────────────────────────
 
     async def _handle_memory_add(self, args: dict) -> dict:
-        content = args.get("content", "")
-        mem_type = args.get("type", "general")
-        memory_id = await self.ctx.memory.add(content=content, type=mem_type)
-        return {"ok": True, "memory_id": str(memory_id)}
+        return await self.ctx.memory_manager.handle_tool_call("memory_add", args)
 
     async def _handle_memory_search(self, args: dict) -> dict:
-        query = args.get("query", "")
-        limit = int(args.get("limit", 10))
-        results = await self.ctx.memory.search(query=query, limit=limit)
-        return {"results": [r.model_dump() for r in results]}
+        return await self.ctx.memory_manager.handle_tool_call("memory_search", args)
 
     async def _handle_memory_recall(self, args: dict) -> dict:
-        limit = int(args.get("limit", 20))
-        results = await self.ctx.memory.recent(limit=limit)
-        return {"results": [r.model_dump() for r in results]}
+        return await self.ctx.memory_manager.handle_tool_call("memory_recall", args)
+
+    # ── Operator handlers ────────────────────────────────────────────────────
+
+    async def _handle_operator_create(self, args: dict) -> dict:
+        return await self.ctx.operator_service.create(
+            name=args.get("name", "Untitled Operator"),
+            operator_type=args.get("type", "live_trade"),
+            spec=args.get("spec") or {},
+        )
+
+    async def _handle_operator_list(self, args: dict) -> dict:
+        return await self.ctx.operator_service.list(
+            state_filter=args.get("state_filter", "all"),
+        )
+
+    async def _handle_operator_invoke(self, args: dict) -> dict:
+        from uuid import UUID
+
+        operator_id = UUID(args.get("operator_id", ""))
+        return await self.ctx.operator_service.invoke(
+            operator_id=operator_id,
+            input_payload=args.get("input"),
+        )
+
+    async def _handle_operator_status(self, args: dict) -> dict:
+        from uuid import UUID
+
+        operator_id = UUID(args.get("operator_id", ""))
+        return await self.ctx.operator_service.status(operator_id=operator_id)
+
+    async def _handle_operator_pause(self, args: dict) -> dict:
+        from uuid import UUID
+
+        operator_id = UUID(args.get("operator_id", ""))
+        return await self.ctx.operator_service.pause(
+            operator_id=operator_id,
+            reason=args.get("reason", ""),
+        )
+
+    async def _handle_operator_archive(self, args: dict) -> dict:
+        from uuid import UUID
+
+        operator_id = UUID(args.get("operator_id", ""))
+        return await self.ctx.operator_service.archive(operator_id=operator_id)
 
     # ── Web handlers ──────────────────────────────────────────────────────────
 

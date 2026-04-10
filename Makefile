@@ -73,6 +73,18 @@ agent:
 	cd services/agent && uv run uvicorn motis_agent.server:app \
 		--host 0.0.0.0 --port 8001 --reload --log-level info
 
+chat:
+	@echo "Starting Motis CLI (no platform required)..."
+	@[ "$$MOTIS_API_KEY" ] || [ "$$OPENAI_API_KEY" ] || \
+		(echo "Error: set MOTIS_API_KEY or OPENAI_API_KEY first" && exit 1)
+	cd services/agent && uv run python -m motis_agent.cli
+
+ask:
+	@[ "$(Q)" ] || (echo "Usage: make ask Q='your question here'" && exit 1)
+	@[ "$$MOTIS_API_KEY" ] || [ "$$OPENAI_API_KEY" ] || \
+		(echo "Error: set MOTIS_API_KEY or OPENAI_API_KEY first" && exit 1)
+	cd services/agent && uv run python -m motis_agent.cli --one-shot "$(Q)"
+
 platform:
 	@echo "Starting platform service with hot-reload..."
 	cd services/platform && uv run uvicorn motis_platform.api.app:app \
@@ -138,6 +150,8 @@ help:
 	@echo ""
 	@echo "Services:"
 	@echo "  make agent           Run agent service (hot-reload)"
+	@echo "  make chat            Run Motis CLI REPL (no platform needed)"
+	@echo "  make ask Q='...'     One-shot agent query (no platform needed)"
 	@echo "  make platform        Run platform service (hot-reload)"
 	@echo "  make worker          Run Celery operator worker"
 	@echo ""
