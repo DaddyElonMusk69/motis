@@ -286,43 +286,69 @@ operator_create(
 
 ---
 
-## The SDK Surface (what operator code uses)
+## The SDK Surface — Operators as MCP Clients
 
-Operators have **full Python access**. No sandbox. But the SDK provides convenience functions
-that are the *recommended* way to do things:
+On-platform, operators are **MCP clients**. Their SDK calls route through the hosted
+Motis MCP servers rather than talking to exchanges or data sources directly. This gives us:
+
+- **Credential isolation** — exchange API keys live in the MCP server, never in operator code
+- **Unified audit trail** — every order flows through MCP → logged to the immutable `trade_log`
+- **Paper/live switching** — same `submit_order()` call; the MCP server picks the right backend
+
+### SDK functions and their backends
 
 ```python
-# ── Data + Skills ──────────────────────────────────────────────────────
-from motis_operator.sdk import call_skill
-# call_skill("data.ohlcv", {"symbol": "BTC/USDT", "interval": "4h"})
-# call_skill("smc.structure", {"ohlcv": data})
-# Routes to the same skill implementations the master agent uses
-
-# ── LLM Reasoning ─────────────────────────────────────────────────────
-from motis_operator.sdk import reason_call
-# reason_call(prompt="...", response_format={"type": "json_object"})
-# Uses the model config from MANIFEST (BYOM) or platform default
-# Hot-patchable: the master agent can update the prompt without
-# rebuilding the entire operator
-
-# ── Execution ──────────────────────────────────────────────────────────
-from motis_operator.sdk import submit_order, cancel_order, get_positions
-# submit_order(symbol, side, size, order_type, sl=, tp=)
-# Goes through the MCP risk layer when on platform
-# Goes directly to exchange SDK when running standalone
-
-# ── Logging ────────────────────────────────────────────────────────────
-from motis_operator.sdk import log_event
-# log_event("node_name", "message", data={...})
-# Written to operator_run_logs table (platform) or stdout (standalone)
-
-# ── State helpers ──────────────────────────────────────────────────────
-from motis_operator.state import BaseOperatorState, Signal, RiskResult
-
-# ── Everything else is allowed too ─────────────────────────────────────
-import ccxt, pandas, numpy, httpx, json, math, datetime
-# Operators are autonomous agents — they can import whatever they need
+from motis_operator.sdk import call_skill, reason_call, submit_order, log_event
 ```
+
+| SDK Function | What it does | Platform backend | Standalone backend |
+|---|---|---|---|
+| `call_skill("data.ohlcv", {...})` | Fetch market data | **MCP** → `finance.data.ohlcv` tool | Direct ccxt/yfinance |
+| `call_skill("research.macro", {...})` | External research APIs | **MCP** → `finance.research.macro` tool | Direct API calls |
+| `call_skill("smc.structure", {...})` | Pure compute (no I/O) | **In-process** — no MCP round-trip | In-process (same) |
+| `call_skill("technical.indicators", {...})` | Pure compute | **In-process** | In-process (same) |
+| `reason_call(prompt, ...)` | LLM call for REASON nodes | Platform model config / BYOM | Local API key |
+| `submit_order(symbol, side, ...)` | Place exchange order | **MCP** → `execute_live_trade` tool | Direct exchange SDK |
+| `cancel_order(order_id)` | Cancel order | **MCP** → `cancel_order` tool | Direct exchange SDK |
+| `get_positions()` | Read open positions | **MCP** → `get_positions` tool | Direct exchange SDK |
+| `log_event(node, msg, data)` | Write observability log | `operator_run_logs` table | stdout |
+
+### The routing rule
+
+```
+I/O skills (data.*, research.*)  → MCP on platform, direct calls standalone
+Pure compute (smc.*, technical.*) → always in-process (no reason to round-trip)
+Execution (submit_order, etc.)    → always MCP on platform, direct SDK standalone
+```
+
+### How it works under the hood
+
+```python
+# motis_operator/sdk.py — simplified
+
+async def submit_order(symbol, side, size_pct, order_type, sl=None, tp=None):
+    if _runtime_mode == "platform":
+        # MCP client call → hosted MCP server → exchange
+        return await _mcp_client.call_tool("execute_live_trade", {
+            "symbol": symbol, "side": side, "size": size_pct,
+            "order_type": order_type, "sl": sl, "tp": tp,
+            "operator_id": _current_operator_id(),
+        })
+    else:
+        # Standalone — direct exchange SDK (ccxt / hyperliquid)
+        return await _exchange_client.create_order(...)
+
+async def call_skill(name, args):
+    if name.startswith(("data.", "research.")):
+        # I/O skills — go through MCP on platform
+        if _runtime_mode == "platform":
+            return await _mcp_client.call_tool(f"finance.{name}", args)
+        return await _direct_skill_call(name, args)
+    # Pure compute — always in-process, both modes
+    return await _run_local_skill(name, args)
+```
+
+The operator code never changes between modes — only the SDK backend swaps.
 
 ---
 
