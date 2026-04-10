@@ -1,0 +1,142 @@
+services:
+  # ─── Infrastructure ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: motis
+      POSTGRES_PASSWORD: motis
+      POSTGRES_DB: motis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U motis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Motis Services ──────────────────────────────────────────────────────
+  mcp:
+    build:
+      context: ./services/mcp
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    env_file: .env
+    environment:
+      - PORT=8002
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/mcp:/app
+      - ./packages:/packages
+
+  agent:
+    build:
+      context: ./services/agent
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    env_file: .env
+    environment:
+      - PORT=8001
+      - MCP_SERVICE_URL=http://mcp:8002
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+    volumes:
+      - ./services/agent:/app
+      - ./packages:/packages
+
+  platform:
+    build:
+      context: ./services/platform
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - PORT=8000
+      - AGENT_SERVICE_URL=http://agent:8001
+      - MCP_SERVICE_URL=http://mcp:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent:
+        condition: service_started
+    volumes:
+      - ./services/platform:/app
+      - ./packages:/packages
+
+  worker:
+    build:
+      context: ./services/platform
+      dockerfile: Dockerfile
+    command: celery -A motis_platform.operator_runtime.worker worker --loglevel=info
+    env_file: .env
+    environment:
+      - MCP_SERVICE_URL=http://mcp:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+    volumes:
+      - ./services/platform:/app
+      - ./packages:/packages
+
+  beat:
+    build:
+      context: ./services/platform
+      dockerfile: Dockerfile
+    command: celery -A motis_platform.operator_runtime.worker beat --loglevel=info
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/platform:/app
+      - ./packages:/packages
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    depends_on:
+      - platform
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+  redis_data:

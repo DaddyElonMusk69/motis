@@ -1,0 +1,55 @@
+name: crypto_trading_desk
+description: >
+  A specialized multi-agent team for cryptocurrency trading analysis.
+  Covers on-chain metrics, technical structure, funding/derivatives,
+  and risk assessment from multiple perspectives.
+
+agents:
+  - name: OnChain Analyst
+    role: on_chain
+    focus: >
+      Analyze on-chain metrics: exchange flows, whale wallets, SOPR,
+      MVRV, realized price, stablecoin supply. Identify accumulation
+      or distribution phases.
+    tools: [get_onchain_metrics, get_exchange_flows]
+
+  - name: Technical Analyst
+    role: technical
+    focus: >
+      Analyze price structure using SMC methodology: identify market
+      structure (BOS/CHoCH), order blocks, FVGs, and liquidity levels.
+      Determine current trend phase and key S/R levels.
+    tools: [get_ohlcv_ccxt, detect_bos, detect_choch, detect_order_blocks]
+
+  - name: Derivatives Analyst
+    role: derivatives
+    focus: >
+      Analyze derivatives market: funding rates, open interest, long/short
+      ratio, options flow, liquidation heatmap. Identify crowded trades
+      and potential squeeze setups.
+    tools: [get_okx_market_data, get_funding_rates]
+
+  - name: Macro Analyst
+    role: macro
+    focus: >
+      Assess macro environment: DXY, risk-on/off sentiment, Fed policy,
+      correlation with traditional markets. BTC dominance and altcoin
+      season indicators.
+    tools: [analyze_macro_environment, get_market_sentiment]
+
+  - name: Risk Officer
+    role: risk
+    focus: >
+      Challenge the bull and bear cases. Identify key risks, black swan
+      scenarios, and portfolio-level correlation risks. Always have the
+      last word before synthesis.
+    tools: []
+
+synthesis:
+  role: >
+    Synthesize all analyst inputs into a structured trading brief with:
+    1. Market bias (bullish/bearish/neutral) with confidence score
+    2. Key price levels to watch
+    3. Suggested trade setups with entry, SL, TP
+    4. Top 3 risks to the thesis
+    5. Recommended operator type for this environment
