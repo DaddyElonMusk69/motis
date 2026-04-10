@@ -62,7 +62,6 @@ def _build_tool_definitions(ctx: UserContext) -> list[dict]:
     the skill registry). MCP tools (operator_*, execute_*) are included
     when the user has at least one connected exchange.
     """
-    from motis_agent.skills.finance import FINANCE_SKILL_DEFINITIONS
     from motis_agent.tools._registry import get_tool_definitions
 
     tools = []
@@ -81,8 +80,8 @@ def _build_tool_definitions(ctx: UserContext) -> list[dict]:
     # Terminal tool (sandboxed Python execution) — always included
     tools.extend(get_tool_definitions(["terminal"]))
 
-    # Finance skills
-    tools.extend(FINANCE_SKILL_DEFINITIONS)
+    # Callable domain skills (currently finance-only, via SkillRegistry)
+    tools.extend(ctx.skill_registry.get_tool_definitions())
 
     # MCP operator tools — always included (user may not have operators yet, that's fine)
     tools.extend(get_tool_definitions([

@@ -11,6 +11,7 @@ class OperatorState(str, Enum):
     LIVE = "live"
     PAUSED = "paused"
     ARCHIVED = "archived"
+    COMPLETE = "complete"   # BacktestOperator / ResearchOperator on-demand runs
 
 
 class AUMClass(str, Enum):

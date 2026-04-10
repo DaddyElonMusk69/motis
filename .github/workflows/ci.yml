@@ -68,12 +68,39 @@ jobs:
       - name: Install workspace
         run: uv sync
 
-      - name: Run tests
+      - name: Enable Postgres extensions + create test DB
+        env:
+          PGPASSWORD: motis
+        run: |
+          psql -h localhost -U motis -d motis -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+          psql -h localhost -U motis -d motis -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+          psql -h localhost -U motis -d postgres -c "CREATE DATABASE motis_test OWNER motis;" || true
+          psql -h localhost -U motis -d motis_test -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" || true
+          psql -h localhost -U motis -d motis_test -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" || true
+
+      - name: Run Alembic migrations
         env:
           DATABASE_URL: postgresql+asyncpg://motis:motis@localhost:5432/motis
+        run: |
+          cd services/platform
+          uv run alembic -c ../../alembic.ini upgrade head
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://motis:motis@localhost:5432/motis_test
           REDIS_URL: redis://localhost:6379/0
           ENCRYPTION_KEY: dGVzdC1rZXktMzItYnl0ZXMtZm9yLWNpLW9ubHk=
-        run: uv run pytest --tb=short -q
+          JWT_SECRET: ci-test-jwt-secret-32-bytes-min-len
+          AGENT_MCP_SECRET: ci-test-agent-mcp-secret
+          MCP_URL: http://localhost:8002
+          TERMINAL_BACKEND: subprocess
+        run: |
+          # Run migrations on test DB
+          cd services/platform
+          DATABASE_URL=postgresql+asyncpg://motis:motis@localhost:5432/motis_test \
+            uv run alembic -c ../../alembic.ini upgrade head
+          cd ../..
+          uv run pytest --tb=short -q
 
   # ── Web (Next.js) ───────────────────────────────────────────────────────────
   web-lint:
