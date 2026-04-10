@@ -37,3 +37,4 @@ logs/
 # Data / secrets
 *.pem
 *.key
+services/agent/upstream/vibe_trading/.git
