@@ -1,7 +1,7 @@
 [project]
 name = "motis-agent"
 version = "0.1.0"
-description = "Motis Master Agent — Hermes-based multi-user agentic coordinator"
+description = "Motis Master Agent — forked multi-user agentic coordinator"
 requires-python = ">=3.11"
 dependencies = [
     "motis-shared",

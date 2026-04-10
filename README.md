@@ -50,7 +50,10 @@ cd services/agent && uvicorn motis_agent.server:app --reload
 uv run pytest
 ```
 
+Workflow: open feature branches and send PRs into `main`. We are using a trunk-based flow by default rather than a long-lived `dev` branch.
+
 ## Docs
 
 - [PRD](docs/motis_prd.md)
 - [Architecture Research](docs/motis_architecture_research.md)
+- [Contributing](CONTRIBUTING.md)

@@ -1,9 +1,9 @@
 # Motis — Product Requirements Document (PRD)
-**Version:** 0.3 — Two-speed scaling architecture  
+**Version:** 0.4 — Agent/Operator separation + Hermes sub-agent system  
 **Date:** 2026-04-10  
 **Status:** Draft for review
 
-> **Changelog v0.3:** Added two-speed system design (stateless conversation layer vs. event-driven durable operator layer). Documents the Celery→Temporal migration path, Kafka/Redpanda market data fan-out, exchange gateway rate limiting, and scaling thresholds per phase. Other agents working from this PRD should treat Section 6 as the authoritative architecture reference.
+> **Changelog v0.4:** Clarified the boundary between the Master Agent and Operators. SwarmRunner moves from being an inline agent skill to the engine inside `ResearchOperator` (a standalone, persistent, schedulable Operator). The Master Agent gains two Hermes-sourced tools: `SubagentRunner` (adapted from `delegate_tool`) for general-purpose parallel task delegation, and `MixtureOfAgents` (adapted from `mixture_of_agents_tool`) for hard multi-model reasoning. Agents working on this project should treat this version as the definitive design.
 
 > **Changelog v0.2:** Vibe-Trading integration strategy changed from "external MCP sidecar" to "absorbed in-process library." Its 68 finance skills become native Motis skills; 29 swarm presets become native SwarmRunner presets; backtest engine imported as a library. This eliminates one service from the deployment stack and gives full control over customization.
 
@@ -179,7 +179,7 @@ Idea ──► Research ──► Backtest ──► Paper Trade ──► Live 
 
 ### 5.1 Motis Master Agent
 
-**What it is:** A multi-user, web-hosted fork of Hermes Agent. The primary conversational interface for everything in the platform.
+**What it is:** A multi-user, web-hosted adaptation of Hermes Agent. The primary conversational interface for everything in the platform.
 
 **Capabilities:**
 - Long-term per-user memory (strategy history, risk preferences, connected exchanges, past conversations)
@@ -188,13 +188,43 @@ Idea ──► Research ──► Backtest ──► Paper Trade ──► Live 
 - Streams all agent loop steps explicitly to the frontend (tool calls, thinking, intermediate results) — user sees exactly what the agent is doing
 - Supports BYOM: user can configure any OpenAI-compatible endpoint for the master agent itself
 - Supports multi-turn strategy refinement
+- **Sub-agent delegation:** spawns N concurrent child agent loops for parallel independent tasks
+- **Mixture-of-Agents:** routes hard analytical problems through multiple frontier models and synthesizes results
 
-**Technical foundation:** Hermes Agent fork, adapted to:
-- Multi-user context isolation (DB-backed memory and skill/operator registries vs. filesystem)
-- Web SSE streaming of agent loop messages
-- Extended tool registry: Operator tools + native finance skills + trading execution MCP tools
-- 68 finance skills absorbed from Vibe-Trading (living in `services/agent/motis_agent/skills/finance/`)
-- 29 research swarm presets as native `SwarmRunner` configs (living in `services/agent/motis_agent/swarms/`)
+**Tool registry — what the Master Agent can call:**
+
+| Tool | Source | Purpose |
+|---|---|---|
+| `finance.*` (68 skills) | Vibe-Trading (absorbed) | Data, SMC analysis, technical indicators, reporting |
+| `operator_*` | Motis MCP | CRUD + invoke operators (create, list, status, archive) |
+| `execute_paper_trade`, `execute_live_trade` | Motis MCP | Trading execution (risk guard enforced at MCP layer) |
+| `web_search`, `web_fetch` | Hermes `web_tools.py` | Research, news, financial reports, SEC filings |
+| `terminal` (sandboxed) | Hermes `terminal_tool.py` | Run Python analysis scripts in isolated container |
+| `memory_*` | Hermes `memory_tool.py` (adapted) | DB-backed per-user memory (replaces filesystem) |
+| `delegate_task` | Hermes `delegate_tool.py` (adapted) | Spawn N parallel sub-agent loops for independent tasks |
+| `mixture_of_agents` | Hermes `mixture_of_agents_tool.py` (adapted) | Route hard problems through multiple frontier models |
+
+**What the Master Agent does NOT do inline:**
+- Run research swarms → creates/invokes a `ResearchOperator` instead (persisted, visible in sidebar)
+- Run backtests → creates/invokes a `BacktestOperator` instead (persisted, results attached to Operator spec)
+- Execute live trades directly → always routed through the MCP execution layer with risk guard
+
+**Technical foundation — Hermes files adapted for Motis:**
+
+| Hermes file | Motis adaptation | Key changes |
+|---|---|---|
+| `run_agent.py` → `AIAgent` class | `core/loop.py` → `MotisAgentLoop` | Remove FS state; inject `UserContext`; yield SSE events instead of print |
+| `agent/context_compressor.py` | `core/compression.py` | Take as-is — critical for long trading sessions |
+| `agent/memory_manager.py` | `core/memory.py` | Replace SQLite/file with PostgreSQL FTS; scope queries to `user_id` |
+| `agent/prompt_builder.py` | `core/prompts.py` | Update identity, platform hints, skill guidance for Motis |
+| `tools/delegate_tool.py` | `tools/subagent.py` | Replace `AIAgent` spawn with `MotisAgentLoop` spawn; remove Docker/Modal backends; share `UserContext` |
+| `tools/mixture_of_agents_tool.py` | `tools/moa.py` | Replace OpenRouter hardcoded models with user's BYOM config; make async-native |
+| `tools/web_tools.py` | `tools/web.py` | Take as-is; add Brave/Tavily key from user's `UserContext` config |
+| `tools/terminal_tool.py` | `tools/terminal.py` | Harden sandbox: per-user Docker container, no network, 30s timeout, import restrictions |
+| `model_tools.py` | `core/model.py` | OpenAI-compatible LLM calling; replace Hermes provider router with simpler BYOM config |
+| `trajectory_compressor.py` | `core/trajectory.py` | Take as-is |
+
+> **Hermes upstream is at:** `services/agent/upstream/hermes_agent/`. Do not edit it. Copy files to `services/agent/motis_agent/` and adapt there.
 
 ---
 
@@ -222,14 +252,39 @@ graph.add_node("execute_orders", execute_orders_node)             # deterministi
 graph.add_node("monitor_positions", monitor_positions_node)       # deterministic
 ```
 
-**Key properties:**
-- **Deterministic by default** — model reasoning is opt-in at specific nodes
-- **Full strategy scope** — manages multiple assets, handles position sizing, tracks P&D
-- **Versioned** — every change creates a new version; rollback at any time
-- **Stateful and resumable** — operator state persists across ticks; survives server restarts
-- **Two risk layers:** (1) Operator-internal risk rules (user-defined or agent-recommended), (2) Platform-level hard limits (position size caps, daily loss limits — enforced at the execution MCP layer)
-- **Configurable trigger:** time-based (e.g., every 1min), event-based (price level, news event), or hybrid
-- **BYOM for operators:** each operator can specify its own model for reasoning nodes, independent of the master agent
+**Operator types:**
+
+| Type | What it does | Trigger |
+|---|---|---|
+| `LiveTradeOperator` | Runs a live strategy against an exchange | Time-based or event-based |
+| `PaperTradeOperator` | Same as live but simulated fills | Time-based or event-based |
+| `BacktestOperator` | Runs strategy against historical data; produces metrics + report | On-demand (ad hoc) |
+| `ResearchOperator` | Runs a multi-agent research swarm; persists the brief | Scheduled or on-demand |
+
+**ResearchOperator** is a first-class Operator type, not an inline agent skill. It wraps `SwarmRunner` in a LangGraph graph with persistence, scheduling, and sidebar visibility:
+
+```python
+# ResearchOperator node structure
+class ResearchState(TypedDict):
+    prompt: str
+    swarm_preset: str              # e.g. "crypto_trading_desk"
+    per_agent_outputs: dict        # bull, bear, quant, macro, risk
+    synthesis: str                 # final brief
+    report_url: str                # S3 link to full report
+
+graph = StateGraph(ResearchState)
+graph.add_node("configure_swarm", configure_swarm_node)    # pick preset + inject market context
+graph.add_node("run_swarm_agents", run_swarm_agents_node)  # SwarmRunner.stream() — parallel model calls
+graph.add_node("synthesize", synthesize_node)              # model call: synthesize all agent outputs
+graph.add_node("persist_brief", persist_brief_node)        # save to S3 + trade_context table
+graph.add_node("notify_user", notify_user_node)            # SSE event: "Research complete"
+```
+
+This means:
+- Research results are **persisted** — user reviews the full brief in the sidebar days later
+- Research can be **scheduled** — e.g., "run BTC macro brief every Sunday at 00:00"
+- Research briefs can **feed other operators** — a `LiveTradeOperator` reads the latest brief from the `trade_context` table as signal context
+- Research brief is **attached to backtest specs** — marketplace listings show the research thesis alongside verified performance
 
 **Operator states:**
 - `draft` — built, not yet backtested
@@ -238,6 +293,7 @@ graph.add_node("monitor_positions", monitor_positions_node)       # deterministi
 - `live` — actively live trading
 - `paused` — manually paused
 - `archived` — inactive
+- `complete` — for `BacktestOperator` and `ResearchOperator` on-demand runs
 
 ---
 
@@ -254,11 +310,11 @@ graph.add_node("monitor_positions", monitor_positions_node)       # deterministi
 ```
 User describes strategy
   ↓
-Agent asks clarifying questions (asset universe? timeframe? risk tolerance? 
+Agent asks clarifying questions (asset universe? timeframe? risk tolerance?
   existing strategy code to adapt?)
   ↓
-Agent generates ResearchSwarm brief (optional, user can skip)
-  ↓
+Agent creates a ResearchOperator (optional, user can skip)
+  ↓ ResearchOperator runs async — user sees "Research running..." in sidebar
 Agent proposes operator graph + parameters in structured form
   ↓
 User approves or refines in conversation
@@ -268,28 +324,41 @@ Operator spec written to DB → appears in sidebar as "Draft"
 Agent recommends next step (backtest / paper trade)
 ```
 
+> **Key principle:** The Master Agent never runs a swarm inline. It always creates a `ResearchOperator` so the results are persisted, schedulable, and referenceable by other operators.
+
 ---
 
 ### 5.4 Research & Backtesting
 
-**Research:**
-- Powered by the native `SwarmRunner` with 29 presets: `investment_committee`, `crypto_trading_desk`, `quant_strategy_desk`, `macro_rates_fx_desk`, etc.
-- Swarms are native LangGraph multi-agent graphs — each agent role (bull, bear, quant, macro, risk) runs in sequence and outputs are synthesized
-- Invoked directly by the Master Agent as a skill call: `SwarmRunner.stream(prompt, preset)`
-- Results streamed to chat in real-time (per-agent events); agent synthesizes output into actionable strategy recommendations
-- New swarm presets can be created by the agent and saved as YAML configs in `swarms/presets/`
+**Research — via `ResearchOperator`:**
+- Research is always run as a `ResearchOperator`, never inline in the agent loop
+- Agent creates a `ResearchOperator` referencing the chosen preset and invokes it via `operator_invoke`
+- Available presets (29 total): `investment_committee`, `crypto_trading_desk`, `quant_strategy_desk`, `macro_rates_fx_desk`, etc.
+- Each agent role (bull, bear, quant, macro, risk) runs as a separate model call inside `SwarmRunner`; results are synthesized
+- Output streamed to chat in real-time via SSE (per-agent role events as they complete)
+- Results persisted to DB + S3; visible as a completed operator run in the sidebar
+- ResearchOperators can be scheduled (e.g., weekly macro brief), not just one-shot
+- Research brief is scoped to the user and can be read by their `LiveTradeOperator` as signal context
+
+**Research vs. Sub-agent delegation — when to use which:**
+
+| Need | Use |
+|---|---|
+| "Analyze BTC from bull/bear/quant/macro perspectives" | `ResearchOperator` (structured domain expert debate, persisted) |
+| "Do X and Y in parallel right now" | `delegate_task` (Hermes sub-agent, ephemeral, general-purpose) |
+| "Solve this hard analytical problem" | `mixture_of_agents` (multi-model reasoning, ephemeral) |
 
 **Backtesting:**
-- Powered by Motis's native backtest engine (absorbed from Vibe-Trading, lives in `services/agent/motis_agent/skills/finance/`)
+- Always runs as a `BacktestOperator` (persisted, results attached to Operator spec)
 - Data routing via native auto-fallback skill: 5 sources (ccxt, yfinance, akshare, tushare, okx) with zero-config for most markets
 - Supported markets: crypto (CCXT, OKX), US/HK equities (yfinance), A-shares (tushare/AKShare), forex, futures
 - Output: Sharpe ratio, max drawdown, win rate, Calmar, full trade log, equity curve
 - Pine Script v6 export → user can visualize on TradingView
 - **Backtest results are attached to the Operator spec** — displayed in sidebar and referenced in Marketplace listings
-- `BacktestOperator` is itself a LangGraph workflow: `strategy_parse → data_fetch → engine_run → metrics → ai_critique → report`
+- `BacktestOperator` node structure: `strategy_parse → data_fetch → engine_run → metrics → ai_critique → persist_report`
   - The `ai_critique` node uses a model to identify failure modes and suggest improvements
 
-> **Implementation note:** Vibe-Trading's codebase (MIT licensed) was the source for the 68 skills and 29 swarm presets. They are now maintained directly in the Motis repo under `services/agent/motis_agent/skills/finance/` and `services/agent/motis_agent/swarms/`. Attribution preserved per MIT terms.
+> **Implementation note:** Vibe-Trading's codebase (MIT licensed) was the source for the 68 skills, 29 swarm presets, and backtest engine. They are maintained in the Motis repo. Attribution preserved per MIT terms.
 
 ---
 
