@@ -8,7 +8,7 @@ source of truth for architectural decisions, system contracts, and integration p
 | # | Document | Description | Status |
 |---|---|---|---|
 | 1 | [Architecture Research](./01-architecture-research.md) | Pre-PRD survey of Hermes, Vibe Trading, and Claude Managed Agents. Key decisions on what to fork, what to mount via MCP, and what to skip. | **Final** |
-| 2 | [Operator System](./02-operator-system.md) | The operator contract (STATE + MANIFEST + build_graph), 5 node types, Quality Gate, lifecycle state machine, SDK surface, standalone execution model. | **Final** |
+| 2 | [Operator System](../operators/README.md) | The operator contract, 5 node types, Quality Gate, standalone execution model, and SDK. Chunked into 4 sub-documents for readability. | **Final** |
 | 3 | [Skill Integration](./03-skill-integration.md) | How Vibe Trading's 68 skills map into Motis tools. The 3-layer call stack, naming conventions, implementation backlog. | **Final** |
 
 ## How to use these
@@ -26,8 +26,13 @@ docs/
 ├── motis_prd.md                      ← Product requirements (what we're building)
 ├── design/                           ← THIS FOLDER: how we're building it
 │   ├── 01-architecture-research.md   ← Technology survey + key decisions
-│   ├── 02-operator-system.md         ← Operator contract + runtime + Quality Gate
 │   └── 03-skill-integration.md       ← Vibe Trading → Motis skill mapping
+├── operators/                        ← Detailed operator documentation
+│   ├── README.md                     ← Start here
+│   ├── 01-architecture-overview.md
+│   ├── 02-contract-and-validation.md
+│   ├── 03-sdk-and-execution.md
+│   └── 04-workflow-and-appendix.md
 ├── adr/                              ← Architecture Decision Records (atomic)
 ├── diagrams/                         ← Visual diagrams
 └── *.md                              ← Porting docs (operational, not design)
