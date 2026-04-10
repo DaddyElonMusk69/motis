@@ -24,7 +24,7 @@ Before opening a PR, run the checks that apply to your change:
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy packages/shared/motis_shared
-uv run mypy packages/operator_sdk/motis_operator
+uv run mypy services/agent/motis_agent/operators
 uv run pytest --tb=short -q
 cd web && npm ci && npm run type-check && npm run lint
 ```

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from motis_operator.registry import OperatorRegistry
+from motis_agent.operators.registry import OperatorRegistry
 from motis_shared.types import OperatorState
 
 

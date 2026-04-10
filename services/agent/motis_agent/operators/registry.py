@@ -5,7 +5,7 @@ Mode-aware operator registry that loads operators from filesystem (dev/standalon
 or PostgreSQL (platform mode).
 
 In dev mode, operators are Python modules loaded from the filesystem at
-``packages/operator_sdk/motis_operator/operators/``.  Each module must export
+``services/agent/motis_agent/operators/operators/``.  Each module must export
 the operator contract: STATE, MANIFEST, build_graph().
 
 In platform mode, operators are stored as graph_code TEXT in the operators
@@ -50,7 +50,7 @@ def _is_valid_operator_namespace(ns: dict) -> bool:
 
 def _load_module_from_path(filepath: Path) -> ModuleType | None:
     """Import a Python module from an absolute path without polluting sys.modules permanently."""
-    module_name = f"motis_operator.operators.{filepath.stem}"
+    module_name = f"motis_agent.operators.operators.{filepath.stem}"
     try:
         spec = importlib.util.spec_from_file_location(module_name, filepath)
         if spec is None or spec.loader is None:
