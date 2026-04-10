@@ -19,9 +19,10 @@ from motis_operator.sdk import call_skill, reason_call, run_agent, submit_order,
 | `call_skill("data.ohlcv", {...})` | Fetch market data | **MCP** → `finance.data.ohlcv` tool | Direct ccxt/yfinance |
 | `call_skill("research.macro", {...})` | External research APIs | **MCP** → `finance.research.macro` tool | Direct API calls |
 | `call_skill("smc.structure", {...})` | Pure compute (no I/O) | **In-process** — no MCP round-trip | In-process (same) |
-| `call_skill("technical.indicators", {...})` | Pure compute | **In-process** | In-process (same) |
+| `call_skill("signals.smc", {...})` | Signal generation (backtest-ready) | **In-process** | In-process (same) |
 | `reason_call(prompt, ...)` | Single LLM call for REASON nodes | Platform model config / BYOM | Local API key |
 | `run_agent(agent_id, context)` | Spawn scoped sub-agent loop | New agent instance with scoped tools/skills | Same (local) |
+| `run_backtest(data_map, signal_fn, ...)` | Bar-by-bar strategy backtest | In-process (async) | In-process (same) |
 | `submit_order(symbol, side, ...)` | Place exchange order | **MCP** → `execute_live_trade` tool | Direct exchange SDK |
 | `cancel_order(order_id)` | Cancel order | **MCP** → `cancel_order` tool | Direct exchange SDK |
 | `get_positions()` | Read open positions | **MCP** → `get_positions` tool | Direct exchange SDK |
