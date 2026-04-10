@@ -94,20 +94,73 @@ class OperatorService:
         operator_id: UUID,
         input_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        operator = await self._registry.get(operator_id)
-        if not operator:
-            raise ValueError("Operator not found")
+        """
+        Run an operator's graph synchronously and return the result.
+
+        In dev/standalone mode, loads the operator from the filesystem via
+        the registry, builds its LangGraph graph, and invokes it.
+
+        Design reference: docs/operators/03-sdk-and-execution.md §Runtime Execution
+        """
+        # Try to get the loaded operator (filesystem or DB-backed)
+        loaded = await self._registry.get_loaded_operator(str(operator_id))
+        if loaded is None:
+            # Fall back to the simple dict lookup
+            operator = await self._registry.get(operator_id)
+            if not operator:
+                raise ValueError(f"Operator not found: {operator_id}")
+            return {
+                "ok": False,
+                "operator_id": str(operator_id),
+                "status": "not_runnable",
+                "message": (
+                    "Operator found but cannot be invoked — it may be a platform "
+                    "operator and the local runtime bridge is not wired yet."
+                ),
+                "operator": self._serialize_operator(operator),
+            }
+
+        # Build the graph
+        try:
+            graph = loaded.build_graph()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "operator_id": str(operator_id),
+                "status": "build_failed",
+                "message": f"Failed to build operator graph: {exc}",
+            }
+
+        # Invoke the graph
+        try:
+            initial_state = dict(input_payload or {})
+            if hasattr(graph, "ainvoke"):
+                # LangGraph compiled graph
+                result = await graph.ainvoke(initial_state)
+            elif callable(graph):
+                # Fallback sequential runner
+                result = await graph(initial_state)
+            else:
+                return {
+                    "ok": False,
+                    "operator_id": str(operator_id),
+                    "status": "invalid_graph",
+                    "message": "build_graph() returned a non-callable, non-graph object.",
+                }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "operator_id": str(operator_id),
+                "status": "execution_failed",
+                "message": f"Operator execution failed: {exc}",
+            }
 
         return {
-            "ok": False,
+            "ok": True,
             "operator_id": str(operator_id),
-            "status": "not_implemented",
-            "message": (
-                "Operator invocation stays in the Motis operator layer, "
-                "but the local operator runtime bridge is not wired yet."
-            ),
-            "input": self._jsonable(input_payload or {}),
-            "operator": self._serialize_operator(operator),
+            "status": "completed",
+            "result": self._jsonable(result),
+            "operator": loaded.to_summary_dict(),
         }
 
     async def runtime_state(self, *, operator_id: UUID) -> dict[str, Any]:

@@ -92,6 +92,53 @@ _TOOL_DEFINITIONS: dict[str, dict] = {
         },
     },
 
+    "session_search": {
+        "type": "function",
+        "function": {
+            "name": "session_search",
+            "description": (
+                "Search past Motis conversations for cross-session recall, or list recent "
+                "sessions when no query is provided. Use this proactively when the user "
+                "references earlier work, previous decisions, old fixes, or asks what was "
+                "done before."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Optional search query. Omit it entirely to browse recent "
+                            "conversations instead of searching."
+                        ),
+                    },
+                    "role_filter": {
+                        "type": "string",
+                        "description": (
+                            "Optional comma-separated role filter: user, assistant, tool."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 3,
+                        "description": "Maximum conversations to return.",
+                    },
+                    "include_child_sessions": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Include delegated child sessions directly. By default, "
+                            "recent mode hides them and search mode collapses child "
+                            "matches back to the root conversation."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+
     # ── Web ───────────────────────────────────────────────────────────────────
     "web_search": {
         "type": "function",
@@ -328,6 +375,51 @@ _TOOL_DEFINITIONS: dict[str, dict] = {
             "parameters": {
                 "type": "object",
                 "properties": {"operator_id": {"type": "string"}},
+                "required": ["operator_id"],
+            },
+        },
+    },
+
+    "operator_update_prompt": {
+        "type": "function",
+        "function": {
+            "name": "operator_update_prompt",
+            "description": (
+                "Hot-patch a REASON node's prompt in a running operator without "
+                "rebuilding the graph. Use to refine entry/exit criteria, adjust "
+                "confidence thresholds, or update market analysis instructions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operator_id": {"type": "string"},
+                    "node_name": {
+                        "type": "string",
+                        "description": "Name of the REASON node whose prompt to update.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The new prompt text for the REASON node.",
+                    },
+                },
+                "required": ["operator_id", "node_name", "prompt"],
+            },
+        },
+    },
+
+    "operator_export": {
+        "type": "function",
+        "function": {
+            "name": "operator_export",
+            "description": (
+                "Export an operator's Python module to a file for standalone use. "
+                "The file can be placed in ~/.motis/operators/ for standalone mode."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operator_id": {"type": "string"},
+                },
                 "required": ["operator_id"],
             },
         },

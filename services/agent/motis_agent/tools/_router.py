@@ -17,11 +17,14 @@ per-request from UserContext.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from motis_agent.context import UserContext
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from motis_agent.core.budget import IterationBudget
 
 
 # Tools dispatched via MCP HTTP (services/mcp)
@@ -49,9 +52,18 @@ class MotisToolRouter:
     per-request, UserContext-scoped dispatch model.
     """
 
-    def __init__(self, ctx: UserContext, *, sub_depth: int = 0):
+    def __init__(
+        self,
+        ctx: UserContext,
+        *,
+        sub_depth: int = 0,
+        iteration_budget: "IterationBudget | None" = None,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    ):
         self.ctx = ctx
         self.sub_depth = sub_depth
+        self.iteration_budget = iteration_budget
+        self.progress_callback = progress_callback
 
     async def dispatch(self, tool_name: str, args: dict, *, call_id: str) -> Any:
         """
@@ -101,6 +113,8 @@ class MotisToolRouter:
             return await self._handle_memory_search(args)
         if tool_name == "memory_recall":
             return await self._handle_memory_recall(args)
+        if tool_name == "session_search":
+            return await self._handle_session_search(args)
 
         # Operator tools live in Motis locally, not in the remote MCP boundary.
         if tool_name == "operator_create":
@@ -115,6 +129,10 @@ class MotisToolRouter:
             return await self._handle_operator_pause(args)
         if tool_name == "operator_archive":
             return await self._handle_operator_archive(args)
+        if tool_name == "operator_update_prompt":
+            return await self._handle_operator_update_prompt(args)
+        if tool_name == "operator_export":
+            return await self._handle_operator_export(args)
 
         # Web tools (adapted from Hermes tools/web_tools.py)
         if tool_name == "web_search":
@@ -150,6 +168,14 @@ class MotisToolRouter:
 
     async def _handle_memory_recall(self, args: dict) -> dict:
         return await self.ctx.memory_manager.handle_tool_call("memory_recall", args)
+
+    async def _handle_session_search(self, args: dict) -> dict:
+        return await self.ctx.session_search.search(
+            query=args.get("query", ""),
+            role_filter=args.get("role_filter"),
+            limit=args.get("limit", 3),
+            include_child_sessions=args.get("include_child_sessions", False),
+        )
 
     # ── Operator handlers ────────────────────────────────────────────────────
 
@@ -195,6 +221,64 @@ class MotisToolRouter:
         operator_id = UUID(args.get("operator_id", ""))
         return await self.ctx.operator_service.archive(operator_id=operator_id)
 
+    async def _handle_operator_update_prompt(self, args: dict) -> dict:
+        """
+        Hot-patch a REASON node's prompt within a loaded operator.
+        Design reference: docs/operators/03-sdk-and-execution.md §Hot-Patching
+        """
+        operator_id = args.get("operator_id", "")
+        node_name = args.get("node_name", "")
+        prompt = args.get("prompt", "")
+
+        loaded = await self.ctx.operator_registry.get_loaded_operator(operator_id)
+        if loaded is None:
+            return {"ok": False, "error": f"Operator {operator_id} not found or not loaded"}
+
+        manifest = loaded.manifest
+        reason_prompts = manifest.get("reason_prompts", {})
+        old_prompt = reason_prompts.get(node_name)
+        if old_prompt is None:
+            return {
+                "ok": False,
+                "error": f"Node '{node_name}' has no reason_prompt entry in MANIFEST",
+                "available_nodes": list(reason_prompts.keys()),
+            }
+
+        reason_prompts[node_name] = prompt
+        return {
+            "ok": True,
+            "operator_id": operator_id,
+            "node_name": node_name,
+            "message": f"Prompt for '{node_name}' updated successfully",
+        }
+
+    async def _handle_operator_export(self, args: dict) -> dict:
+        """
+        Export an operator's Python source to a file.
+        Design reference: docs/operators/01-architecture-overview.md §Export/Import Flow
+        """
+        operator_id = args.get("operator_id", "")
+        loaded = await self.ctx.operator_registry.get_loaded_operator(operator_id)
+
+        if loaded is None:
+            return {"ok": False, "error": f"Operator {operator_id} not found or not loaded"}
+
+        # For filesystem operators, return the source file path
+        module = loaded.module
+        if hasattr(module, "__file__") and module.__file__:
+            return {
+                "ok": True,
+                "operator_id": operator_id,
+                "source_path": module.__file__,
+                "message": f"Operator source at: {module.__file__}",
+            }
+
+        return {
+            "ok": False,
+            "operator_id": operator_id,
+            "message": "Operator source export from DB not yet implemented.",
+        }
+
     # ── Web handlers ──────────────────────────────────────────────────────────
 
     async def _handle_web_search(self, args: dict) -> dict:
@@ -234,7 +318,13 @@ class MotisToolRouter:
         from motis_agent.tools.subagent import motis_delegate_task
         if self.sub_depth >= MotisToolRouter._MAX_DELEGATE_DEPTH:
             return {"error": "Delegation depth limit reached. Sub-agents cannot spawn further sub-agents."}
-        return await motis_delegate_task(args=args, ctx=self.ctx, sub_depth=self.sub_depth + 1)
+        return await motis_delegate_task(
+            args=args,
+            ctx=self.ctx,
+            sub_depth=self.sub_depth + 1,
+            iteration_budget=self.iteration_budget,
+            progress_callback=self.progress_callback,
+        )
 
     _MAX_DELEGATE_DEPTH = 2
 

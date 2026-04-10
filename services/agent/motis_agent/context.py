@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from motis_agent.core.memory import MemoryStore
     from motis_agent.core.memory_manager import MemoryManager
     from motis_agent.core.operators import OperatorService
+    from motis_agent.core.session_search import SessionSearchService
+    from motis_agent.core.session_store import SessionStore
     from motis_agent.core.skills import SkillRegistry
     from motis_operator.registry import OperatorRegistry
 
@@ -40,17 +42,21 @@ class UserContext:
     - Motis: state lives in PostgreSQL keyed by user_id (N users, N processes)
 
     Used by: MotisAgentLoop, MotisToolRouter, SubagentRunner, MoA tool,
-    MemoryStore, OperatorRegistry, SkillRegistry.
+    MemoryStore, SessionStore, OperatorRegistry, SkillRegistry.
     """
 
     user_id: UUID
     email: str
     model_config: ModelConfig
     conversation_id: UUID = field(default_factory=uuid4)
+    conversation_source: str = "chat"
+    parent_conversation_id: UUID | None = None
 
     # Lazy-initialised by __post_init__ — never set directly
     memory: "MemoryStore" = field(init=False)
     memory_manager: "MemoryManager" = field(init=False)
+    session_store: "SessionStore" = field(init=False)
+    session_search: "SessionSearchService" = field(init=False)
     skill_registry: "SkillRegistry" = field(init=False)
     operator_registry: "OperatorRegistry" = field(init=False)
     operator_service: "OperatorService" = field(init=False)
@@ -63,15 +69,34 @@ class UserContext:
         from motis_agent.core.memory_manager import MemoryManager
         from motis_agent.core.memory_providers import PostgresMemoryProvider
         from motis_agent.core.operators import OperatorService
+        from motis_agent.core.session_search import SessionSearchService
+        from motis_agent.core.session_store import SessionStore
         from motis_agent.core.skills import SkillRegistry
+        from motis_agent.settings import settings as _settings
         from motis_operator.registry import OperatorRegistry
 
         self.memory = MemoryStore(user_id=self.user_id)
         self.memory_manager = MemoryManager(
             providers=[PostgresMemoryProvider(self.memory)]
         )
+        self.session_store = SessionStore(
+            user_id=self.user_id,
+            conversation_id=self.conversation_id,
+            source=self.conversation_source,
+            parent_conversation_id=self.parent_conversation_id,
+        )
+        self.session_search = SessionSearchService(
+            user_id=self.user_id,
+            conversation_id=self.conversation_id,
+            parent_conversation_id=self.parent_conversation_id,
+            model_config=self.model_config,
+        )
         self.skill_registry = SkillRegistry(user_id=self.user_id)
-        self.operator_registry = OperatorRegistry(user_id=self.user_id)
+        self.operator_registry = OperatorRegistry(
+            user_id=self.user_id,
+            runtime_mode=_settings.runtime_mode,
+            operators_path=_settings.operators_path,
+        )
         self.operator_service = OperatorService(self.operator_registry)
 
     @property
@@ -100,6 +125,8 @@ async def get_user_context(
     x_model_name: str = Header(...),
     x_model_reference_models: str = Header(default=""),
     x_conversation_id: str = Header(default=""),
+    x_conversation_source: str = Header(default="chat"),
+    x_parent_conversation_id: str = Header(default=""),
 ) -> UserContext:
     """
     FastAPI dependency. The platform gateway validates the JWT and injects
@@ -110,6 +137,8 @@ async def get_user_context(
 
     x_model_reference_models: comma-separated list of extra models for MoA.
     x_conversation_id: UUID of the current conversation (for memory scoping).
+    x_conversation_source: trusted internal source tag for the conversation.
+    x_parent_conversation_id: trusted internal parent conversation UUID.
     """
     try:
         user_id = UUID(x_user_id)
@@ -124,6 +153,13 @@ async def get_user_context(
             raise HTTPException(status_code=400, detail="Invalid X-Conversation-Id")
     else:
         conversation_id = uuid4()
+
+    parent_conversation_id: UUID | None = None
+    if x_parent_conversation_id:
+        try:
+            parent_conversation_id = UUID(x_parent_conversation_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid X-Parent-Conversation-Id")
 
     reference_models = (
         [m.strip() for m in x_model_reference_models.split(",") if m.strip()]
@@ -143,4 +179,6 @@ async def get_user_context(
         email=x_user_email,
         model_config=model_config,
         conversation_id=conversation_id,
+        conversation_source=x_conversation_source or "chat",
+        parent_conversation_id=parent_conversation_id,
     )

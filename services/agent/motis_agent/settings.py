@@ -7,6 +7,8 @@ Loaded once at import time. Validated by pydantic-settings.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,9 +20,23 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ── Runtime mode ───────────────────────────────────────────────────────────
+    # Controls where operators and skills are loaded from.
+    # See: docs/operators/05-configuration-guide.md
+    #   dev        → filesystem (packages/operator_sdk/motis_operator/operators/)
+    #   platform   → PostgreSQL (multi-user, per user_id)
+    #   standalone → filesystem (~/.motis/operators/)
+    runtime_mode: str = "dev"
+
     # ── Database ───────────────────────────────────────────────────────────────
     # asyncpg driver required: postgresql+asyncpg://...
     database_url: str = "postgresql+asyncpg://motis:motis@localhost:5432/motis"
+
+    # ── Operator + skill filesystem paths (dev / standalone) ──────────────────
+    # Auto-computed from runtime_mode if not explicitly set.
+    # See: docs/operators/01-architecture-overview.md §Where Operators Live
+    operators_path: str = ""
+    skills_path: str = ""
 
     # ── Inter-service auth ─────────────────────────────────────────────────────
     # Shared secret between agent service and MCP service.
@@ -43,6 +59,38 @@ class Settings(BaseSettings):
     terminal_timeout_seconds: int = 30
     # Phase 0: "subprocess" (restricted). Phase 1: "docker"
     terminal_backend: str = "subprocess"
+
+    def model_post_init(self, __context: Any) -> None:
+        """Compute default paths based on runtime_mode when not explicitly set."""
+        import os
+        from pathlib import Path
+
+        if not self.operators_path:
+            if self.runtime_mode == "dev":
+                # Resolve relative to the project root (heuristic: walk up from this file)
+                project_root = Path(__file__).resolve().parents[3]  # services/agent/motis_agent/ → project root
+                self.operators_path = str(project_root / "packages" / "operator_sdk" / "motis_operator" / "operators")
+            elif self.runtime_mode == "standalone":
+                self.operators_path = str(Path.home() / ".motis" / "operators")
+
+        if not self.skills_path:
+            if self.runtime_mode == "dev":
+                project_root = Path(__file__).resolve().parents[3]
+                self.skills_path = str(project_root / "services" / "agent" / "motis_agent" / "skills" / "finance")
+            elif self.runtime_mode == "standalone":
+                self.skills_path = str(Path.home() / ".motis" / "skills")
+
+    @property
+    def is_dev(self) -> bool:
+        return self.runtime_mode == "dev"
+
+    @property
+    def is_platform(self) -> bool:
+        return self.runtime_mode == "platform"
+
+    @property
+    def is_standalone(self) -> bool:
+        return self.runtime_mode == "standalone"
 
 
 settings = Settings()
