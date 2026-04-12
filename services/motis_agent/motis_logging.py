@@ -2,7 +2,7 @@
 
 Provides a single ``setup_logging()`` entry point that both the CLI and
 gateway call early in their startup path. All log files live under
-``~/.hermes/logs/`` (profile-aware via ``get_hermes_home()``).
+``~/.motis/logs/`` (profile-aware via ``get_motis_home()``).
 
 Log files produced:
     agent.log   — INFO+, all agent/tool/session activity (the main log)
@@ -18,7 +18,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-from motis_constants import get_hermes_home
+from motis_constants import get_motis_home
 
 # Sentinel to track whether setup_logging() has already run. The function
 # is idempotent — calling it twice is safe but the second call is a no-op
@@ -50,6 +50,7 @@ _NOISY_LOGGERS = (
 
 def setup_logging(
     *,
+    motis_home: Optional[Path] = None,
     hermes_home: Optional[Path] = None,
     log_level: Optional[str] = None,
     max_size_mb: Optional[int] = None,
@@ -64,9 +65,11 @@ def setup_logging(
 
     Parameters
     ----------
+    motis_home
+        Override for the Motis home directory. Falls back to
+        ``get_motis_home()`` (profile-aware).
     hermes_home
-        Override for the Hermes home directory. Falls back to
-        ``get_hermes_home()`` (profile-aware).
+        Backward-compatible alias for older Hermes-named callers.
     log_level
         Minimum level for the ``agent.log`` file handler. Accepts any
         standard Python level name (``"DEBUG"``, ``"INFO"``, ``"WARNING"``).
@@ -90,10 +93,10 @@ def setup_logging(
     """
     global _logging_initialized
     if _logging_initialized and not force:
-        home = hermes_home or get_hermes_home()
+        home = motis_home or hermes_home or get_motis_home()
         return home / "logs"
 
-    home = hermes_home or get_hermes_home()
+    home = motis_home or hermes_home or get_motis_home()
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -221,7 +224,7 @@ def _read_logging_config():
     try:
         import yaml
 
-        config_path = get_hermes_home() / "config.yaml"
+        config_path = get_motis_home() / "config.yaml"
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}

@@ -49,7 +49,7 @@ The market core is also wired now through free-first structured adapters:
 
 Current provider routing:
 
-- A-shares: `tushare -> akshare`
+- A-shares: `tushare -> yfinance -> akshare`
 - US / HK equities: `yfinance -> akshare`
 - Crypto spot / perp: `okx -> ccxt`
 
@@ -65,6 +65,7 @@ Current provider routing:
 
 - US macro: `fred`
 - China macro: `akshare`
+- A-share equity fundamentals and earnings: `tushare -> yfinance`
 - US / HK equity fundamentals and earnings: `yfinance -> tushare`
 - Connect flows and A-share moneyflow: `tushare`
 

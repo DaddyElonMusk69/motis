@@ -8,67 +8,107 @@ import os
 from pathlib import Path
 
 
-def get_hermes_home() -> Path:
-    """Return the active Motis home directory (default: ~/.motis).
-
-    Reads HERMES_HOME env var, falls back to ~/.motis.
-    This is the single source of truth — all other copies should import this.
-    """
-    return Path(os.getenv("HERMES_HOME", Path.home() / ".motis"))
-
-
 def get_motis_home() -> Path:
     """Return the active Motis home directory.
 
-    This is a Motis-named alias over the current HERMES_HOME compatibility
-    layer so the CLI and newer modules can stop speaking in Hermes terms
-    without forcing an immediate storage-path migration.
+    Resolution order:
+    1. ``MOTIS_HOME`` (preferred)
+    2. ``HERMES_HOME`` (compatibility)
+    3. ``~/.motis`` default
     """
-    return get_hermes_home()
+    return Path(
+        os.getenv("MOTIS_HOME")
+        or os.getenv("HERMES_HOME")
+        or (Path.home() / ".motis")
+    )
+
+
+def get_hermes_home() -> Path:
+    """Backward-compatible alias for older Hermes-named callers."""
+    return get_motis_home()
+
+
+def _motis_env_suffix(name: str) -> str:
+    """Normalize a Motis/Hermes env var name to its shared suffix."""
+    if name.startswith("MOTIS_"):
+        return name[len("MOTIS_"):]
+    if name.startswith("HERMES_"):
+        return name[len("HERMES_"):]
+    return name
+
+
+def get_motis_env(name: str, default: str | None = None) -> str | None:
+    """Return a Motis runtime env var, preferring Motis names over Hermes aliases."""
+    suffix = _motis_env_suffix(name)
+    for key in (f"MOTIS_{suffix}", f"HERMES_{suffix}"):
+        if key in os.environ:
+            return os.environ[key]
+    return default
+
+
+def set_motis_env(name: str, value: str, *, compatibility: bool = True) -> None:
+    """Set a Motis env var and, by default, its Hermes compatibility alias."""
+    suffix = _motis_env_suffix(name)
+    text = str(value)
+    os.environ[f"MOTIS_{suffix}"] = text
+    if compatibility:
+        os.environ[f"HERMES_{suffix}"] = text
+
+
+def unset_motis_env(name: str, *, compatibility: bool = True) -> None:
+    """Unset a Motis env var and, by default, its Hermes compatibility alias."""
+    suffix = _motis_env_suffix(name)
+    os.environ.pop(f"MOTIS_{suffix}", None)
+    if compatibility:
+        os.environ.pop(f"HERMES_{suffix}", None)
 
 
 def get_optional_skills_dir(default: Path | None = None) -> Path:
     """Return the optional-skills directory, honoring package-manager wrappers.
 
     Packaged installs may ship ``optional-skills`` outside the Python package
-    tree and expose it via ``HERMES_OPTIONAL_SKILLS``.
+    tree and expose it via ``MOTIS_OPTIONAL_SKILLS`` or the older
+    ``HERMES_OPTIONAL_SKILLS`` compatibility variable.
     """
-    override = os.getenv("HERMES_OPTIONAL_SKILLS", "").strip()
+    override = (
+        os.getenv("MOTIS_OPTIONAL_SKILLS", "").strip()
+        or os.getenv("HERMES_OPTIONAL_SKILLS", "").strip()
+    )
     if override:
         return Path(override)
     if default is not None:
         return default
-    return get_hermes_home() / "optional-skills"
+    return get_motis_home() / "optional-skills"
 
 
-def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
-    """Resolve a Hermes subdirectory with backward compatibility.
+def get_motis_dir(new_subpath: str, old_name: str) -> Path:
+    """Resolve a Motis subdirectory with backward compatibility.
 
     New installs get the consolidated layout (e.g. ``cache/images``).
     Existing installs that already have the old path (e.g. ``image_cache``)
     keep using it — no migration required.
 
     Args:
-        new_subpath: Preferred path relative to HERMES_HOME (e.g. ``"cache/images"``).
-        old_name: Legacy path relative to HERMES_HOME (e.g. ``"image_cache"``).
+        new_subpath: Preferred path relative to Motis home (e.g. ``"cache/images"``).
+        old_name: Legacy path relative to Motis home (e.g. ``"image_cache"``).
 
     Returns:
         Absolute ``Path`` — old location if it exists on disk, otherwise the new one.
     """
-    home = get_hermes_home()
+    home = get_motis_home()
     old_path = home / old_name
     if old_path.exists():
         return old_path
     return home / new_subpath
 
 
-def get_motis_dir(new_subpath: str, old_name: str) -> Path:
-    """Motis-named alias for compatibility-aware subdirectory resolution."""
-    return get_hermes_dir(new_subpath, old_name)
+def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
+    """Backward-compatible alias for older Hermes-named callers."""
+    return get_motis_dir(new_subpath, old_name)
 
 
-def display_hermes_home() -> str:
-    """Return a user-friendly display string for the current HERMES_HOME.
+def display_motis_home() -> str:
+    """Return a user-friendly display string for the current Motis home.
 
     Uses ``~/`` shorthand for readability::
 
@@ -78,18 +118,18 @@ def display_hermes_home() -> str:
 
     Use this in **user-facing** print/log messages instead of hardcoding
     the home path. For code that needs a real ``Path``, use
-    :func:`get_hermes_home` instead.
+    :func:`get_motis_home` instead.
     """
-    home = get_hermes_home()
+    home = get_motis_home()
     try:
         return "~/" + str(home.relative_to(Path.home()))
     except ValueError:
         return str(home)
 
 
-def display_motis_home() -> str:
-    """Return a user-friendly display string for the active Motis home."""
-    return display_hermes_home()
+def display_hermes_home() -> str:
+    """Backward-compatible alias for older Hermes-named callers."""
+    return display_motis_home()
 
 
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")

@@ -93,13 +93,13 @@ Current state:
 - URL extract and single-URL reads are wired to a Motis HTTP reader with basic SSRF protection.
 - Crawl contract exists, but crawl provider wiring is still pending.
 - The market core is now wired through structured fallback chains:
-  - A-shares: `tushare -> akshare`
+  - A-shares: `tushare -> yfinance -> akshare`
   - US / HK equities: `yfinance -> akshare`
   - Crypto: `okx -> ccxt`
 - The first structured research-data slice is now live:
   - `macro.get_series`: `fred` for US, `akshare` for China
-  - `equity.get_fundamentals`: `yfinance -> tushare`
-  - `equity.get_earnings_calendar`: `yfinance -> tushare`
+  - `equity.get_fundamentals`: A-shares `tushare -> yfinance`; US / HK `yfinance -> tushare`
+  - `equity.get_earnings_calendar`: A-shares `tushare -> yfinance`; US / HK `yfinance -> tushare`
   - `flows.get_connect`: `tushare`
   - `china.get_moneyflow`: `tushare`
 

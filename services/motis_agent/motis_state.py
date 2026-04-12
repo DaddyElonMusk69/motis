@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-SQLite State Store for Motis.
+SQLite state store for Motis.
 
-Provides persistent session storage with FTS5 full-text search, replacing
-the per-session JSONL file approach. Stores session metadata, full message
-history, and model configuration for CLI and gateway sessions.
+The standalone runtime exposes a compatibility-oriented ``SessionDB`` API, but
+its active storage model is Motis-shaped:
 
-Key design decisions:
-- WAL mode for concurrent readers + one writer (gateway multi-platform)
-- FTS5 virtual table for fast text search across all session messages
-- Compression-triggered session splitting via parent_session_id chains
-- Batch runner and RL trajectories are NOT stored here (separate systems)
-- Session source tagging ('cli', 'telegram', 'discord', etc.) for filtering
+- conversations
+- conversation_messages
+- agent_memories
+
+Legacy Hermes ``sessions`` / ``messages`` tables are migration inputs only and
+are no longer the active write path.
 """
 
 import json
@@ -22,7 +21,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from motis_constants import get_hermes_home
+from motis_constants import get_motis_home
 from motis_storage import normalize_storage_source, resolve_motis_user_id
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -32,68 +31,17 @@ T = TypeVar("T")
 
 def get_default_db_path() -> Path:
     """Return the active profile-scoped SQLite path."""
-    return get_hermes_home() / "state.db"
+    return get_motis_home() / "state.db"
 
 
 DEFAULT_DB_PATH = get_default_db_path()
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
-SCHEMA_SQL = """
+BASE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    user_id TEXT,
-    model TEXT,
-    model_config TEXT,
-    system_prompt TEXT,
-    parent_session_id TEXT,
-    started_at REAL NOT NULL,
-    ended_at REAL,
-    end_reason TEXT,
-    message_count INTEGER DEFAULT 0,
-    tool_call_count INTEGER DEFAULT 0,
-    input_tokens INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0,
-    cache_read_tokens INTEGER DEFAULT 0,
-    cache_write_tokens INTEGER DEFAULT 0,
-    reasoning_tokens INTEGER DEFAULT 0,
-    billing_provider TEXT,
-    billing_base_url TEXT,
-    billing_mode TEXT,
-    estimated_cost_usd REAL,
-    actual_cost_usd REAL,
-    cost_status TEXT,
-    cost_source TEXT,
-    pricing_version TEXT,
-    title TEXT,
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    role TEXT NOT NULL,
-    content TEXT,
-    tool_call_id TEXT,
-    tool_calls TEXT,
-    tool_name TEXT,
-    timestamp REAL NOT NULL,
-    token_count INTEGER,
-    finish_reason TEXT,
-    reasoning TEXT,
-    reasoning_details TEXT,
-    codex_reasoning_items TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 """
 
 MOTIS_SCHEMA_SQL = """
@@ -138,6 +86,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     tool_name TEXT,
     created_at REAL NOT NULL,
     sequence INTEGER NOT NULL,
+    token_count INTEGER,
     finish_reason TEXT,
     reasoning TEXT,
     reasoning_details TEXT,
@@ -148,6 +97,8 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, upda
 CREATE INDEX IF NOT EXISTS idx_conversations_source ON conversations(source);
 CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_started ON conversations(started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_title_unique
+    ON conversations(title) WHERE title IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
     ON conversation_messages(conversation_id, sequence);
 
@@ -250,6 +201,57 @@ AFTER UPDATE OF content ON agent_memories BEGIN
 END;
 """
 
+SESSION_SELECT_SQL = """
+SELECT
+    id,
+    user_id,
+    title,
+    source,
+    model,
+    model_config,
+    system_prompt,
+    parent_conversation_id AS parent_session_id,
+    started_at,
+    updated_at,
+    ended_at,
+    end_reason,
+    message_count,
+    tool_call_count,
+    input_tokens,
+    output_tokens,
+    cache_read_tokens,
+    cache_write_tokens,
+    reasoning_tokens,
+    billing_provider,
+    billing_base_url,
+    billing_mode,
+    estimated_cost_usd,
+    actual_cost_usd,
+    cost_status,
+    cost_source,
+    pricing_version
+FROM conversations
+"""
+
+MESSAGE_SELECT_SQL = """
+SELECT
+    id,
+    conversation_id AS session_id,
+    role,
+    content,
+    tool_call_id,
+    tool_calls,
+    tool_name,
+    created_at AS timestamp,
+    sequence,
+    token_count,
+    finish_reason,
+    reasoning,
+    reasoning_details,
+    codex_reasoning_items
+FROM conversation_messages
+"""
+
 
 class SessionDB:
     """
@@ -274,14 +276,21 @@ class SessionDB:
     # Attempt a PASSIVE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
 
-    def __init__(self, db_path: Path = None):
+    def __init__(self, db_path: Path = None, *, readonly: bool = False):
         self.db_path = db_path or get_default_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._readonly = readonly
+        if not self._readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
         self._write_count = 0
+        connect_target = str(self.db_path)
+        connect_kwargs: Dict[str, Any] = {}
+        if self._readonly:
+            connect_target = f"file:{self.db_path}?mode=ro"
+            connect_kwargs["uri"] = True
         self._conn = sqlite3.connect(
-            str(self.db_path),
+            connect_target,
             check_same_thread=False,
             # Short timeout — application-level retry with random jitter
             # handles contention instead of sitting in SQLite's internal
@@ -291,12 +300,15 @@ class SessionDB:
             # transactions on DML, which conflicts with our explicit
             # BEGIN IMMEDIATE.  None = we manage transactions ourselves.
             isolation_level=None,
+            **connect_kwargs,
         )
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        if not self._readonly:
+            self._conn.execute("PRAGMA journal_mode=WAL")
 
-        self._init_schema()
+        if not self._readonly:
+            self._init_schema()
 
     # ── Core write helper ──
 
@@ -315,6 +327,8 @@ class SessionDB:
 
         Returns whatever *fn* returns.
         """
+        if self._readonly:
+            raise RuntimeError("SessionDB opened in read-only mode")
         last_err: Optional[Exception] = None
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
@@ -361,6 +375,8 @@ class SessionDB:
         connections.
         """
         try:
+            if self._readonly:
+                return
             with self._lock:
                 result = self._conn.execute(
                     "PRAGMA wal_checkpoint(PASSIVE)"
@@ -381,115 +397,114 @@ class SessionDB:
         """
         with self._lock:
             if self._conn:
-                try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except Exception:
-                    pass
+                if not self._readonly:
+                    try:
+                        self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    except Exception:
+                        pass
                 self._conn.close()
                 self._conn = None
+
+    @staticmethod
+    def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
 
     def _init_schema(self):
         """Create tables and FTS if they don't exist, run migrations."""
         cursor = self._conn.cursor()
-        needs_motis_conversation_rebuild = False
+        needs_conversation_rebuild = False
 
-        cursor.executescript(SCHEMA_SQL)
+        cursor.executescript(BASE_SCHEMA_SQL)
         cursor.executescript(MOTIS_SCHEMA_SQL)
+        has_legacy_sessions = self._table_exists(cursor, "sessions")
+        has_legacy_messages = self._table_exists(cursor, "messages")
 
         # Check schema version and run migrations
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
-        if row is None:
-            cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-        else:
-            current_version = row["version"] if isinstance(row, sqlite3.Row) else row[0]
-            if current_version < 2:
-                # v2: add finish_reason column to messages
+        current_version = int(row["version"]) if row is not None else 0
+
+        if has_legacy_sessions and current_version < 2:
+            try:
+                cursor.execute("ALTER TABLE messages ADD COLUMN finish_reason TEXT")
+            except sqlite3.OperationalError:
+                pass
+            current_version = 2
+
+        if has_legacy_sessions and current_version < 3:
+            try:
+                cursor.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
+            except sqlite3.OperationalError:
+                pass
+            current_version = 3
+
+        if has_legacy_sessions and current_version < 4:
+            try:
+                cursor.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
+                    "ON sessions(title) WHERE title IS NOT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass
+            current_version = 4
+
+        if has_legacy_sessions and current_version < 5:
+            new_columns = [
+                ("cache_read_tokens", "INTEGER DEFAULT 0"),
+                ("cache_write_tokens", "INTEGER DEFAULT 0"),
+                ("reasoning_tokens", "INTEGER DEFAULT 0"),
+                ("billing_provider", "TEXT"),
+                ("billing_base_url", "TEXT"),
+                ("billing_mode", "TEXT"),
+                ("estimated_cost_usd", "REAL"),
+                ("actual_cost_usd", "REAL"),
+                ("cost_status", "TEXT"),
+                ("cost_source", "TEXT"),
+                ("pricing_version", "TEXT"),
+            ]
+            for name, column_type in new_columns:
                 try:
-                    cursor.execute("ALTER TABLE messages ADD COLUMN finish_reason TEXT")
+                    safe_name = name.replace('"', '""')
+                    cursor.execute(f'ALTER TABLE sessions ADD COLUMN "{safe_name}" {column_type}')
                 except sqlite3.OperationalError:
-                    pass  # Column already exists
-                cursor.execute("UPDATE schema_version SET version = 2")
-            if current_version < 3:
-                # v3: add title column to sessions
+                    pass
+            current_version = 5
+
+        if has_legacy_messages and current_version < 6:
+            for col_name, col_type in [
+                ("reasoning", "TEXT"),
+                ("reasoning_details", "TEXT"),
+                ("codex_reasoning_items", "TEXT"),
+            ]:
                 try:
-                    cursor.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
-                cursor.execute("UPDATE schema_version SET version = 3")
-            if current_version < 4:
-                # v4: add unique index on title (NULLs allowed, only non-NULL must be unique)
-                try:
+                    safe = col_name.replace('"', '""')
                     cursor.execute(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
-                        "ON sessions(title) WHERE title IS NOT NULL"
+                        f'ALTER TABLE messages ADD COLUMN "{safe}" {col_type}'
                     )
                 except sqlite3.OperationalError:
-                    pass  # Index already exists
-                cursor.execute("UPDATE schema_version SET version = 4")
-            if current_version < 5:
-                new_columns = [
-                    ("cache_read_tokens", "INTEGER DEFAULT 0"),
-                    ("cache_write_tokens", "INTEGER DEFAULT 0"),
-                    ("reasoning_tokens", "INTEGER DEFAULT 0"),
-                    ("billing_provider", "TEXT"),
-                    ("billing_base_url", "TEXT"),
-                    ("billing_mode", "TEXT"),
-                    ("estimated_cost_usd", "REAL"),
-                    ("actual_cost_usd", "REAL"),
-                    ("cost_status", "TEXT"),
-                    ("cost_source", "TEXT"),
-                    ("pricing_version", "TEXT"),
-                ]
-                for name, column_type in new_columns:
-                    try:
-                        # name and column_type come from the hardcoded tuple above,
-                        # not user input. Double-quote identifier escaping is applied
-                        # as defense-in-depth; SQLite DDL cannot be parameterized.
-                        safe_name = name.replace('"', '""')
-                        cursor.execute(f'ALTER TABLE sessions ADD COLUMN "{safe_name}" {column_type}')
-                    except sqlite3.OperationalError:
-                        pass
-                cursor.execute("UPDATE schema_version SET version = 5")
-            if current_version < 6:
-                # v6: add reasoning columns to messages table — preserves assistant
-                # reasoning text and structured reasoning_details across gateway
-                # session turns.  Without these, reasoning chains are lost on
-                # session reload, breaking multi-turn reasoning continuity for
-                # providers that replay reasoning (OpenRouter, OpenAI, Nous).
-                for col_name, col_type in [
-                    ("reasoning", "TEXT"),
-                    ("reasoning_details", "TEXT"),
-                    ("codex_reasoning_items", "TEXT"),
-                ]:
-                    try:
-                        safe = col_name.replace('"', '""')
-                        cursor.execute(
-                            f'ALTER TABLE messages ADD COLUMN "{safe}" {col_type}'
-                        )
-                    except sqlite3.OperationalError:
-                        pass  # Column already exists
-                cursor.execute("UPDATE schema_version SET version = 6")
-            if current_version < 7:
+                    pass
+            current_version = 6
+
+        if current_version < 8:
+            try:
+                cursor.execute("ALTER TABLE conversation_messages ADD COLUMN token_count INTEGER")
+            except sqlite3.OperationalError:
+                pass
+
+            if has_legacy_sessions and has_legacy_messages:
                 self._backfill_motis_storage(cursor)
-                cursor.execute("UPDATE schema_version SET version = 7")
-                needs_motis_conversation_rebuild = True
+                needs_conversation_rebuild = True
 
-        # Unique title index — always ensure it exists (safe to run after migrations
-        # since the title column is guaranteed to exist at this point)
-        try:
-            cursor.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
-                "ON sessions(title) WHERE title IS NOT NULL"
-            )
-        except sqlite3.OperationalError:
-            pass  # Index already exists
-
-        # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
-        try:
-            cursor.execute("SELECT * FROM messages_fts LIMIT 0")
-        except sqlite3.OperationalError:
-            cursor.executescript(FTS_SQL)
+            if row is None:
+                cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            else:
+                cursor.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        elif row is None:
+            cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
 
         try:
             cursor.execute("SELECT * FROM conversation_messages_fts LIMIT 0")
@@ -501,7 +516,7 @@ class SessionDB:
         except sqlite3.OperationalError:
             cursor.executescript(MEMORY_FTS_SQL)
 
-        if needs_motis_conversation_rebuild:
+        if needs_conversation_rebuild:
             try:
                 cursor.execute(
                     "INSERT INTO conversation_messages_fts(conversation_messages_fts) "
@@ -828,28 +843,35 @@ class SessionDB:
         """Create a new session record. Returns the session_id."""
         normalized_source = normalize_storage_source(source, fallback="cli")
         resolved_user_id = resolve_motis_user_id(user_id, normalized_source)
+        started_at = time.time()
 
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """
+                INSERT OR IGNORE INTO conversations (
+                    id, user_id, title, source, model, model_config, system_prompt,
+                    parent_conversation_id, started_at, updated_at, ended_at,
+                    end_reason, message_count, tool_call_count, input_tokens,
+                    output_tokens, cache_read_tokens, cache_write_tokens,
+                    reasoning_tokens, billing_provider, billing_base_url,
+                    billing_mode, estimated_cost_usd, actual_cost_usd, cost_status,
+                    cost_source, pricing_version
+                ) VALUES (
+                    ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, 0,
+                    0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+                )
+                """,
                 (
                     session_id,
-                    normalized_source,
                     resolved_user_id,
+                    normalized_source,
                     model,
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
                     parent_session_id,
-                    time.time(),
+                    started_at,
+                    started_at,
                 ),
-            )
-            self._upsert_conversation_from_legacy(
-                conn,
-                session_id,
-                fallback_source=normalized_source,
-                fallback_user_id=resolved_user_id,
             )
         self._execute_write(_do)
         return session_id
@@ -858,30 +880,27 @@ class SessionDB:
         """Mark a session as ended."""
         def _do(conn):
             conn.execute(
-                "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
-                (time.time(), end_reason, session_id),
+                "UPDATE conversations SET ended_at = ?, end_reason = ?, updated_at = ? WHERE id = ?",
+                (time.time(), end_reason, time.time(), session_id),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
             conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
-                (session_id,),
+                "UPDATE conversations SET ended_at = NULL, end_reason = NULL, updated_at = ? WHERE id = ?",
+                (time.time(), session_id),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):
             conn.execute(
-                "UPDATE sessions SET system_prompt = ? WHERE id = ?",
-                (system_prompt, session_id),
+                "UPDATE conversations SET system_prompt = ?, updated_at = ? WHERE id = ?",
+                (system_prompt, time.time(), session_id),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def update_token_counts(
@@ -913,7 +932,7 @@ class SessionDB:
         cached agent accumulates across messages).
         """
         if absolute:
-            sql = """UPDATE sessions SET
+            sql = """UPDATE conversations SET
                    input_tokens = ?,
                    output_tokens = ?,
                    cache_read_tokens = ?,
@@ -930,10 +949,11 @@ class SessionDB:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
+                   updated_at = ?,
                    model = COALESCE(model, ?)
                    WHERE id = ?"""
         else:
-            sql = """UPDATE sessions SET
+            sql = """UPDATE conversations SET
                    input_tokens = input_tokens + ?,
                    output_tokens = output_tokens + ?,
                    cache_read_tokens = cache_read_tokens + ?,
@@ -950,6 +970,7 @@ class SessionDB:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
+                   updated_at = ?,
                    model = COALESCE(model, ?)
                    WHERE id = ?"""
         params = (
@@ -967,12 +988,12 @@ class SessionDB:
             billing_provider,
             billing_base_url,
             billing_mode,
+            time.time(),
             model,
             session_id,
         )
         def _do(conn):
             conn.execute(sql, params)
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def ensure_session(
@@ -993,16 +1014,21 @@ class SessionDB:
 
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions
-                   (id, source, user_id, model, started_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (session_id, normalized_source, resolved_user_id, model, time.time()),
-            )
-            self._upsert_conversation_from_legacy(
-                conn,
-                session_id,
-                fallback_source=normalized_source,
-                fallback_user_id=resolved_user_id,
+                """
+                INSERT OR IGNORE INTO conversations (
+                    id, user_id, title, source, model, model_config, system_prompt,
+                    parent_conversation_id, started_at, updated_at, ended_at,
+                    end_reason, message_count, tool_call_count, input_tokens,
+                    output_tokens, cache_read_tokens, cache_write_tokens,
+                    reasoning_tokens, billing_provider, billing_base_url,
+                    billing_mode, estimated_cost_usd, actual_cost_usd, cost_status,
+                    cost_source, pricing_version
+                ) VALUES (
+                    ?, ?, NULL, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, 0, 0,
+                    0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+                )
+                """,
+                (session_id, resolved_user_id, normalized_source, model, time.time(), time.time()),
             )
         self._execute_write(_do)
 
@@ -1032,7 +1058,7 @@ class SessionDB:
         """
         def _do(conn):
             conn.execute(
-                """UPDATE sessions SET
+                """UPDATE conversations SET
                    input_tokens = ?,
                    output_tokens = ?,
                    cache_read_tokens = ?,
@@ -1049,6 +1075,7 @@ class SessionDB:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
+                   updated_at = ?,
                    model = COALESCE(model, ?)
                    WHERE id = ?""",
                 (
@@ -1066,18 +1093,19 @@ class SessionDB:
                     billing_provider,
                     billing_base_url,
                     billing_mode,
+                    time.time(),
                     model,
                     session_id,
                 ),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                f"{SESSION_SELECT_SQL} WHERE id = ?",
+                (session_id,),
             )
             row = cursor.fetchone()
         return dict(row) if row else None
@@ -1101,7 +1129,7 @@ class SessionDB:
         )
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\' ORDER BY started_at DESC LIMIT 2",
+                "SELECT id FROM conversations WHERE id LIKE ? ESCAPE '\\' ORDER BY started_at DESC LIMIT 2",
                 (f"{escaped}%",),
             )
             matches = [row["id"] for row in cursor.fetchall()]
@@ -1169,7 +1197,7 @@ class SessionDB:
             if title:
                 # Check uniqueness (allow the same session to keep its own title)
                 cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE title = ? AND id != ?",
+                    "SELECT id FROM conversations WHERE title = ? AND id != ?",
                     (title, session_id),
                 )
                 conflict = cursor.fetchone()
@@ -1178,10 +1206,9 @@ class SessionDB:
                         f"Title '{title}' is already in use by session {conflict['id']}"
                     )
             cursor = conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (title, session_id),
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, time.time(), session_id),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
             return cursor.rowcount
         rowcount = self._execute_write(_do)
         return rowcount > 0
@@ -1190,7 +1217,7 @@ class SessionDB:
         """Get the title for a session, or None."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT title FROM sessions WHERE id = ?", (session_id,)
+                "SELECT title FROM conversations WHERE id = ?", (session_id,)
             )
             row = cursor.fetchone()
         return row["title"] if row else None
@@ -1199,7 +1226,8 @@ class SessionDB:
         """Look up a session by exact title. Returns session dict or None."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE title = ?", (title,)
+                f"{SESSION_SELECT_SQL} WHERE title = ?",
+                (title,),
             )
             row = cursor.fetchone()
         return dict(row) if row else None
@@ -1220,7 +1248,7 @@ class SessionDB:
         escaped = title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT id, title, started_at FROM sessions "
+                "SELECT id, title, started_at FROM conversations "
                 "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
                 (f"{escaped} #%",),
             )
@@ -1251,7 +1279,7 @@ class SessionDB:
         escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
+                "SELECT title FROM conversations WHERE title = ? OR title LIKE ? ESCAPE '\\'",
                 (base, f"{escaped} #%"),
             )
             existing = [row["title"] for row in cursor.fetchall()]
@@ -1306,16 +1334,47 @@ class SessionDB:
             SELECT s.*,
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                     FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                     ORDER BY m.timestamp, m.id LIMIT 1),
+                     FROM conversation_messages m
+                     WHERE m.conversation_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     ORDER BY m.sequence, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw,
                 COALESCE(
-                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    (SELECT MAX(m2.created_at) FROM conversation_messages m2 WHERE m2.conversation_id = s.id),
+                    s.updated_at,
                     s.started_at
                 ) AS last_active
-            FROM sessions s
+            FROM (
+                SELECT
+                    id,
+                    user_id,
+                    title,
+                    source,
+                    model,
+                    model_config,
+                    system_prompt,
+                    parent_conversation_id AS parent_session_id,
+                    started_at,
+                    updated_at,
+                    ended_at,
+                    end_reason,
+                    message_count,
+                    tool_call_count,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                    billing_provider,
+                    billing_base_url,
+                    billing_mode,
+                    estimated_cost_usd,
+                    actual_cost_usd,
+                    cost_status,
+                    cost_source,
+                    pricing_version
+                FROM conversations
+            ) s
             {where_sql}
             ORDER BY s.started_at DESC
             LIMIT ? OFFSET ?
@@ -1379,11 +1438,17 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            now = time.time()
+            session_row = conn.execute(
+                "SELECT message_count FROM conversations WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            next_sequence = (int(session_row["message_count"]) if session_row else 0) + 1
             cursor = conn.execute(
-                """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                """INSERT INTO conversation_messages (conversation_id, role, content, tool_call_id,
+                   tool_calls, tool_name, created_at, sequence, token_count, finish_reason,
                    reasoning, reasoning_details, codex_reasoning_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1391,7 +1456,8 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    now,
+                    next_sequence,
                     token_count,
                     finish_reason,
                     reasoning,
@@ -1404,26 +1470,15 @@ class SessionDB:
             # Update counters
             if num_tool_calls > 0:
                 conn.execute(
-                    """UPDATE sessions SET message_count = message_count + 1,
+                    """UPDATE conversations SET message_count = ?, updated_at = ?,
                        tool_call_count = tool_call_count + ? WHERE id = ?""",
-                    (num_tool_calls, session_id),
+                    (next_sequence, now, num_tool_calls, session_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-                    (session_id,),
+                    "UPDATE conversations SET message_count = ?, updated_at = ? WHERE id = ?",
+                    (next_sequence, now, session_id),
                 )
-            session_row = conn.execute(
-                "SELECT message_count FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
-            sequence = int(session_row["message_count"]) if session_row else 0
-            self._upsert_conversation_message_from_legacy(
-                conn,
-                msg_id,
-                sequence=sequence,
-            )
-            self._upsert_conversation_from_legacy(conn, session_id)
             return msg_id
 
         return self._execute_write(_do)
@@ -1432,7 +1487,7 @@ class SessionDB:
         """Load all messages for a session, ordered by timestamp."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp, id",
+                f"{MESSAGE_SELECT_SQL} WHERE conversation_id = ? ORDER BY sequence, id",
                 (session_id,),
             )
             rows = cursor.fetchall()
@@ -1457,7 +1512,7 @@ class SessionDB:
             cursor = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "reasoning, reasoning_details, codex_reasoning_items "
-                "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
+                "FROM conversation_messages WHERE conversation_id = ? ORDER BY sequence, id",
                 (session_id,),
             )
             rows = cursor.fetchall()
@@ -1581,7 +1636,7 @@ class SessionDB:
             return []
 
         # Build WHERE clauses dynamically
-        where_clauses = ["messages_fts MATCH ?"]
+        where_clauses = ["conversation_messages_fts MATCH ?"]
         params: list = [query]
 
         if source_filter is not None:
@@ -1605,18 +1660,19 @@ class SessionDB:
         sql = f"""
             SELECT
                 m.id,
-                m.session_id,
+                m.conversation_id AS session_id,
                 m.role,
-                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                snippet(conversation_messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
                 m.content,
-                m.timestamp,
+                m.created_at AS timestamp,
+                m.sequence,
                 m.tool_name,
                 s.source,
                 s.model,
                 s.started_at AS session_started
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
+            FROM conversation_messages_fts
+            JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
+            JOIN conversations s ON s.id = m.conversation_id
             WHERE {where_sql}
             ORDER BY rank
             LIMIT ? OFFSET ?
@@ -1636,10 +1692,11 @@ class SessionDB:
             try:
                 with self._lock:
                     ctx_cursor = self._conn.execute(
-                        """SELECT role, content FROM messages
-                           WHERE session_id = ? AND id >= ? - 1 AND id <= ? + 1
-                           ORDER BY id""",
-                        (match["session_id"], match["id"], match["id"]),
+                        """SELECT role, content FROM conversation_messages
+                           WHERE conversation_id = ?
+                             AND sequence BETWEEN ? - 1 AND ? + 1
+                           ORDER BY sequence, id""",
+                        (match["session_id"], match["sequence"], match["sequence"]),
                     )
                     context_msgs = [
                         {"role": r["role"], "content": (r["content"] or "")[:200]}
@@ -1665,12 +1722,12 @@ class SessionDB:
         with self._lock:
             if source:
                 cursor = self._conn.execute(
-                    "SELECT * FROM sessions WHERE source = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                    f"{SESSION_SELECT_SQL} WHERE source = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
                     (source, limit, offset),
                 )
             else:
                 cursor = self._conn.execute(
-                    "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                    f"{SESSION_SELECT_SQL} ORDER BY started_at DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
             return [dict(row) for row in cursor.fetchall()]
@@ -1684,10 +1741,10 @@ class SessionDB:
         with self._lock:
             if source:
                 cursor = self._conn.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE source = ?", (source,)
+                    "SELECT COUNT(*) FROM conversations WHERE source = ?", (source,)
                 )
             else:
-                cursor = self._conn.execute("SELECT COUNT(*) FROM sessions")
+                cursor = self._conn.execute("SELECT COUNT(*) FROM conversations")
             return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:
@@ -1695,10 +1752,10 @@ class SessionDB:
         with self._lock:
             if session_id:
                 cursor = self._conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
+                    "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?", (session_id,)
                 )
             else:
-                cursor = self._conn.execute("SELECT COUNT(*) FROM messages")
+                cursor = self._conn.execute("SELECT COUNT(*) FROM conversation_messages")
             return cursor.fetchone()[0]
 
     # =========================================================================
@@ -1729,17 +1786,13 @@ class SessionDB:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
             conn.execute(
-                "DELETE FROM messages WHERE session_id = ?", (session_id,)
-            )
-            conn.execute(
                 "DELETE FROM conversation_messages WHERE conversation_id = ?",
                 (session_id,),
             )
             conn.execute(
-                "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
-                (session_id,),
+                "UPDATE conversations SET message_count = 0, tool_call_count = 0, updated_at = ? WHERE id = ?",
+                (time.time(), session_id),
             )
-            self._upsert_conversation_from_legacy(conn, session_id)
         self._execute_write(_do)
 
     def delete_session(self, session_id: str) -> bool:
@@ -1751,27 +1804,20 @@ class SessionDB:
         """
         def _do(conn):
             cursor = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE id = ?", (session_id,)
+                "SELECT COUNT(*) FROM conversations WHERE id = ?", (session_id,)
             )
             if cursor.fetchone()[0] == 0:
                 return False
             # Orphan child sessions so FK constraint is satisfied
             conn.execute(
-                "UPDATE sessions SET parent_session_id = NULL "
-                "WHERE parent_session_id = ?",
-                (session_id,),
-            )
-            conn.execute(
                 "UPDATE conversations SET parent_conversation_id = NULL "
                 "WHERE parent_conversation_id = ?",
                 (session_id,),
             )
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute(
                 "DELETE FROM conversation_messages WHERE conversation_id = ?",
                 (session_id,),
             )
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
             return True
         return self._execute_write(_do)
@@ -1788,13 +1834,13 @@ class SessionDB:
         def _do(conn):
             if source:
                 cursor = conn.execute(
-                    """SELECT id FROM sessions
+                    """SELECT id FROM conversations
                        WHERE started_at < ? AND ended_at IS NOT NULL AND source = ?""",
                     (cutoff, source),
                 )
             else:
                 cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
+                    "SELECT id FROM conversations WHERE started_at < ? AND ended_at IS NOT NULL",
                     (cutoff,),
                 )
             session_ids = set(row["id"] for row in cursor.fetchall())
@@ -1805,23 +1851,16 @@ class SessionDB:
             # Orphan any sessions whose parent is about to be deleted
             placeholders = ",".join("?" * len(session_ids))
             conn.execute(
-                f"UPDATE sessions SET parent_session_id = NULL "
-                f"WHERE parent_session_id IN ({placeholders})",
-                list(session_ids),
-            )
-            conn.execute(
                 f"UPDATE conversations SET parent_conversation_id = NULL "
                 f"WHERE parent_conversation_id IN ({placeholders})",
                 list(session_ids),
             )
 
             for sid in session_ids:
-                conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute(
                     "DELETE FROM conversation_messages WHERE conversation_id = ?",
                     (sid,),
                 )
-                conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 conn.execute("DELETE FROM conversations WHERE id = ?", (sid,))
             return len(session_ids)
 

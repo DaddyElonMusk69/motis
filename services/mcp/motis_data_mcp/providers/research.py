@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from motis_data_mcp.contracts import ToolEnvelope, build_not_implemented_envelope, build_tool_envelope
-from motis_data_mcp.providers.market import ResolvedInstrument, resolve_instrument
+from motis_data_mcp.providers.market import ResolvedInstrument, resolve_instrument, without_proxy_env
 
 
 class ResearchDataNotSupported(RuntimeError):
@@ -240,7 +240,8 @@ class AkshareMacroProvider:
         import akshare as ak
         import pandas as pd
 
-        frame = getattr(ak, fn_name)()
+        with without_proxy_env():
+            frame = getattr(ak, fn_name)()
         if frame is None or frame.empty:
             raise ValueError(f"Akshare returned no rows for {country}:{series}")
 
@@ -298,8 +299,8 @@ class YFinanceResearchProvider:
         as_of: str | None,
         frequency: str | None,
     ) -> dict[str, Any]:
-        if resolved.market not in {"us_equity", "hk_equity"}:
-            raise ResearchDataNotSupported("yfinance fundamentals are only used for US and HK equities")
+        if resolved.market not in {"a_share", "us_equity", "hk_equity"}:
+            raise ResearchDataNotSupported("yfinance fundamentals are only used for equity-style markets")
         return await asyncio.to_thread(self._get_fundamentals_sync, resolved, fields, as_of, frequency)
 
     def _get_fundamentals_sync(
@@ -311,9 +312,10 @@ class YFinanceResearchProvider:
     ) -> dict[str, Any]:
         import yfinance as yf
 
-        ticker = yf.Ticker(resolved.provider_symbols["yfinance"])
-        info = getattr(ticker, "info", None) or {}
-        fast_info = getattr(ticker, "fast_info", None) or {}
+        with without_proxy_env():
+            ticker = yf.Ticker(resolved.provider_symbols["yfinance"])
+            info = getattr(ticker, "info", None) or {}
+            fast_info = getattr(ticker, "fast_info", None) or {}
         selected_fields = fields or _default_fundamental_fields()
         field_map = {
             "market_cap": info.get("marketCap") or fast_info.get("marketCap"),
@@ -353,8 +355,8 @@ class YFinanceResearchProvider:
         end_date: str | None,
         limit: int,
     ) -> dict[str, Any]:
-        if resolved.market not in {"us_equity", "hk_equity"}:
-            raise ResearchDataNotSupported("yfinance earnings calendar is only used for US and HK equities")
+        if resolved.market not in {"a_share", "us_equity", "hk_equity"}:
+            raise ResearchDataNotSupported("yfinance earnings calendar is only used for equity-style markets")
         return await asyncio.to_thread(self._get_earnings_calendar_sync, resolved, start_date, end_date, limit)
 
     def _get_earnings_calendar_sync(
@@ -367,49 +369,50 @@ class YFinanceResearchProvider:
         import pandas as pd
         import yfinance as yf
 
-        ticker = yf.Ticker(resolved.provider_symbols["yfinance"])
-        rows: list[dict[str, Any]] = []
+        with without_proxy_env():
+            ticker = yf.Ticker(resolved.provider_symbols["yfinance"])
+            rows: list[dict[str, Any]] = []
 
-        earnings_dates = getattr(ticker, "earnings_dates", None)
-        if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
-            frame = earnings_dates.reset_index()
-            frame.columns = [str(column) for column in frame.columns]
-            date_col = frame.columns[0]
-            eps_estimate_col = next((column for column in frame.columns if "EPS Estimate" in column), None)
-            reported_col = next((column for column in frame.columns if "Reported EPS" in column), None)
-            surprise_col = next((column for column in frame.columns if "Surprise(%)" in column), None)
-            for _, row in frame.iterrows():
-                rows.append(
-                    {
-                        "symbol": resolved.input_symbol,
-                        "normalized_symbol": resolved.normalized_symbol,
-                        "market": resolved.market,
-                        "event_date": _safe_date_string(row[date_col]),
-                        "eps_estimate": _to_float(row.get(eps_estimate_col)) if eps_estimate_col else None,
-                        "reported_eps": _to_float(row.get(reported_col)) if reported_col else None,
-                        "surprise_pct": _to_float(row.get(surprise_col)) if surprise_col else None,
-                        "source": self.name,
-                    }
-                )
-        else:
-            calendar = getattr(ticker, "calendar", None)
-            if calendar is not None and hasattr(calendar, "to_dict"):
-                calendar_dict = calendar.to_dict()
-                event_date = calendar_dict.get("Earnings Date")
-                if isinstance(event_date, list) and event_date:
-                    event_date = event_date[0]
-                rows.append(
-                    {
-                        "symbol": resolved.input_symbol,
-                        "normalized_symbol": resolved.normalized_symbol,
-                        "market": resolved.market,
-                        "event_date": _safe_date_string(event_date),
-                        "eps_estimate": _to_float(calendar_dict.get("EPS Estimate")),
-                        "reported_eps": _to_float(calendar_dict.get("Reported EPS")),
-                        "surprise_pct": None,
-                        "source": self.name,
-                    }
-                )
+            earnings_dates = getattr(ticker, "earnings_dates", None)
+            if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
+                frame = earnings_dates.reset_index()
+                frame.columns = [str(column) for column in frame.columns]
+                date_col = frame.columns[0]
+                eps_estimate_col = next((column for column in frame.columns if "EPS Estimate" in column), None)
+                reported_col = next((column for column in frame.columns if "Reported EPS" in column), None)
+                surprise_col = next((column for column in frame.columns if "Surprise(%)" in column), None)
+                for _, row in frame.iterrows():
+                    rows.append(
+                        {
+                            "symbol": resolved.input_symbol,
+                            "normalized_symbol": resolved.normalized_symbol,
+                            "market": resolved.market,
+                            "event_date": _safe_date_string(row[date_col]),
+                            "eps_estimate": _to_float(row.get(eps_estimate_col)) if eps_estimate_col else None,
+                            "reported_eps": _to_float(row.get(reported_col)) if reported_col else None,
+                            "surprise_pct": _to_float(row.get(surprise_col)) if surprise_col else None,
+                            "source": self.name,
+                        }
+                    )
+            else:
+                calendar = getattr(ticker, "calendar", None)
+                if calendar is not None and hasattr(calendar, "to_dict"):
+                    calendar_dict = calendar.to_dict()
+                    event_date = calendar_dict.get("Earnings Date")
+                    if isinstance(event_date, list) and event_date:
+                        event_date = event_date[0]
+                    rows.append(
+                        {
+                            "symbol": resolved.input_symbol,
+                            "normalized_symbol": resolved.normalized_symbol,
+                            "market": resolved.market,
+                            "event_date": _safe_date_string(event_date),
+                            "eps_estimate": _to_float(calendar_dict.get("EPS Estimate")),
+                            "reported_eps": _to_float(calendar_dict.get("Reported EPS")),
+                            "surprise_pct": None,
+                            "source": self.name,
+                        }
+                    )
 
         rows = [row for row in rows if row.get("event_date")]
         rows = _slice_by_date(rows, "event_date", start_date=start_date, end_date=end_date)
@@ -454,22 +457,23 @@ class TushareResearchProvider:
     ) -> dict[str, Any]:
         import pandas as pd
 
-        api = self._client()
-        kwargs: dict[str, Any] = {"ts_code": resolved.normalized_symbol}
-        if as_of:
-            kwargs["period"] = _ymd(as_of)
-        if frequency and str(frequency).upper().startswith("Q"):
-            kwargs["report_type"] = str(frequency).upper()
+        with without_proxy_env():
+            api = self._client()
+            kwargs: dict[str, Any] = {"ts_code": resolved.normalized_symbol}
+            if as_of:
+                kwargs["period"] = _ymd(as_of)
+            if frequency and str(frequency).upper().startswith("Q"):
+                kwargs["report_type"] = str(frequency).upper()
 
-        if resolved.market == "a_share":
-            frame = api.fina_indicator(**kwargs)
-        elif resolved.market == "hk_equity":
-            frame = api.hk_fina_indicator(**kwargs)
-        elif resolved.market == "us_equity":
-            kwargs["ts_code"] = resolved.normalized_symbol[:-3]
-            frame = api.us_fina_indicator(**kwargs)
-        else:
-            raise ResearchDataNotSupported(f"Tushare fundamentals do not support market '{resolved.market}'")
+            if resolved.market == "a_share":
+                frame = api.fina_indicator(**kwargs)
+            elif resolved.market == "hk_equity":
+                frame = api.hk_fina_indicator(**kwargs)
+            elif resolved.market == "us_equity":
+                kwargs["ts_code"] = resolved.normalized_symbol[:-3]
+                frame = api.us_fina_indicator(**kwargs)
+            else:
+                raise ResearchDataNotSupported(f"Tushare fundamentals do not support market '{resolved.market}'")
 
         if frame is None or frame.empty:
             raise ValueError(f"Tushare returned no fundamentals for {resolved.normalized_symbol}")
@@ -526,26 +530,27 @@ class TushareResearchProvider:
         end_date: str | None,
         limit: int,
     ) -> dict[str, Any]:
-        api = self._client()
+        with without_proxy_env():
+            api = self._client()
 
-        if resolved.market == "a_share":
-            frame = api.disclosure_date(ts_code=resolved.normalized_symbol)
-            if frame is None or frame.empty:
-                raise ValueError(f"Tushare returned no disclosure dates for {resolved.normalized_symbol}")
-            events = [
-                {
-                    "symbol": resolved.input_symbol,
-                    "normalized_symbol": resolved.normalized_symbol,
-                    "market": resolved.market,
-                    "event_date": _clean_date(_pick_first(row, "actual_date", "pre_date")),
-                    "ann_date": _clean_date(row.get("ann_date")),
-                    "report_period": _clean_date(row.get("end_date")),
-                    "source": self.name,
-                }
-                for row in frame.to_dict(orient="records")
-            ]
-        else:
-            raise ResearchDataNotSupported("Tushare earnings calendar is only wired for A-share disclosure dates")
+            if resolved.market == "a_share":
+                frame = api.disclosure_date(ts_code=resolved.normalized_symbol)
+                if frame is None or frame.empty:
+                    raise ValueError(f"Tushare returned no disclosure dates for {resolved.normalized_symbol}")
+                events = [
+                    {
+                        "symbol": resolved.input_symbol,
+                        "normalized_symbol": resolved.normalized_symbol,
+                        "market": resolved.market,
+                        "event_date": _clean_date(_pick_first(row, "actual_date", "pre_date")),
+                        "ann_date": _clean_date(row.get("ann_date")),
+                        "report_period": _clean_date(row.get("end_date")),
+                        "source": self.name,
+                    }
+                    for row in frame.to_dict(orient="records")
+                ]
+            else:
+                raise ResearchDataNotSupported("Tushare earnings calendar is only wired for A-share disclosure dates")
 
         events = [event for event in events if event.get("event_date")]
         events = _slice_by_date(events, "event_date", start_date=start_date, end_date=end_date)
@@ -573,12 +578,12 @@ class TushareResearchProvider:
         start_date: str | None,
         end_date: str | None,
     ) -> dict[str, Any]:
-        api = self._client()
-
-        daily = api.moneyflow_hsgt(
-            start_date=_ymd(start_date) or _ymd(end_date) or datetime.now(UTC).strftime("%Y%m%d"),
-            end_date=_ymd(end_date) or _ymd(start_date) or datetime.now(UTC).strftime("%Y%m%d"),
-        )
+        with without_proxy_env():
+            api = self._client()
+            daily = api.moneyflow_hsgt(
+                start_date=_ymd(start_date) or _ymd(end_date) or datetime.now(UTC).strftime("%Y%m%d"),
+                end_date=_ymd(end_date) or _ymd(start_date) or datetime.now(UTC).strftime("%Y%m%d"),
+            )
         daily_records = []
         if daily is not None and not daily.empty:
             for row in daily.to_dict(orient="records"):
@@ -598,31 +603,32 @@ class TushareResearchProvider:
         top_holdings: list[dict[str, Any]] = []
         if symbols:
             requested = {symbol.upper() for symbol in symbols}
-            for market_type in ("1", "3"):
-                frame = api.hsgt_top10(
-                    start_date=_ymd(start_date) or _ymd(end_date) or datetime.now(UTC).strftime("%Y%m%d"),
-                    end_date=_ymd(end_date) or _ymd(start_date) or datetime.now(UTC).strftime("%Y%m%d"),
-                    market_type=market_type,
-                )
-                if frame is None or frame.empty:
-                    continue
-                for row in frame.to_dict(orient="records"):
-                    symbol = _clean_str(row.get("ts_code")).upper()
-                    if symbol not in requested:
-                        continue
-                    top_holdings.append(
-                        {
-                            "trade_date": _clean_date(row.get("trade_date")),
-                            "symbol": symbol,
-                            "name": row.get("name"),
-                            "market_type": row.get("market_type"),
-                            "rank": _to_int(row.get("rank")),
-                            "amount": _to_float(row.get("amount")),
-                            "net_amount": _to_float(row.get("net_amount")),
-                            "buy": _to_float(row.get("buy")),
-                            "sell": _to_float(row.get("sell")),
-                        }
+            with without_proxy_env():
+                for market_type in ("1", "3"):
+                    frame = api.hsgt_top10(
+                        start_date=_ymd(start_date) or _ymd(end_date) or datetime.now(UTC).strftime("%Y%m%d"),
+                        end_date=_ymd(end_date) or _ymd(start_date) or datetime.now(UTC).strftime("%Y%m%d"),
+                        market_type=market_type,
                     )
+                    if frame is None or frame.empty:
+                        continue
+                    for row in frame.to_dict(orient="records"):
+                        symbol = _clean_str(row.get("ts_code")).upper()
+                        if symbol not in requested:
+                            continue
+                        top_holdings.append(
+                            {
+                                "trade_date": _clean_date(row.get("trade_date")),
+                                "symbol": symbol,
+                                "name": row.get("name"),
+                                "market_type": row.get("market_type"),
+                                "rank": _to_int(row.get("rank")),
+                                "amount": _to_float(row.get("amount")),
+                                "net_amount": _to_float(row.get("net_amount")),
+                                "buy": _to_float(row.get("buy")),
+                                "sell": _to_float(row.get("sell")),
+                            }
+                        )
             top_holdings = _slice_by_date(top_holdings, "trade_date", start_date=start_date, end_date=end_date)
 
         if direction == "northbound":
@@ -674,46 +680,47 @@ class TushareResearchProvider:
         if not symbols:
             raise ResearchDataNotSupported("china.get_moneyflow currently requires explicit symbols")
 
-        api = self._client()
-        items: list[dict[str, Any]] = []
-        for symbol in symbols:
-            resolved = resolve_instrument(symbol)
-            if resolved.market != "a_share":
-                raise ResearchDataNotSupported("china.get_moneyflow only supports A-share symbols in this runtime")
-            frame = api.moneyflow(
-                ts_code=resolved.normalized_symbol,
-                start_date=_ymd(start_date),
-                end_date=_ymd(end_date),
-            )
-            if frame is None or frame.empty:
-                continue
-            records = []
-            for row in frame.to_dict(orient="records"):
-                records.append(
+        with without_proxy_env():
+            api = self._client()
+            items: list[dict[str, Any]] = []
+            for symbol in symbols:
+                resolved = resolve_instrument(symbol)
+                if resolved.market != "a_share":
+                    raise ResearchDataNotSupported("china.get_moneyflow only supports A-share symbols in this runtime")
+                frame = api.moneyflow(
+                    ts_code=resolved.normalized_symbol,
+                    start_date=_ymd(start_date),
+                    end_date=_ymd(end_date),
+                )
+                if frame is None or frame.empty:
+                    continue
+                records = []
+                for row in frame.to_dict(orient="records"):
+                    records.append(
+                        {
+                            "trade_date": _clean_date(row.get("trade_date")),
+                            "net_mf_amount": _to_float(row.get("net_mf_amount")),
+                            "buy_sm_amount": _to_float(row.get("buy_sm_amount")),
+                            "sell_sm_amount": _to_float(row.get("sell_sm_amount")),
+                            "buy_md_amount": _to_float(row.get("buy_md_amount")),
+                            "sell_md_amount": _to_float(row.get("sell_md_amount")),
+                            "buy_lg_amount": _to_float(row.get("buy_lg_amount")),
+                            "sell_lg_amount": _to_float(row.get("sell_lg_amount")),
+                            "buy_elg_amount": _to_float(row.get("buy_elg_amount")),
+                            "sell_elg_amount": _to_float(row.get("sell_elg_amount")),
+                        }
+                    )
+                records = _slice_by_date(records, "trade_date", start_date=start_date, end_date=end_date)
+                items.append(
                     {
-                        "trade_date": _clean_date(row.get("trade_date")),
-                        "net_mf_amount": _to_float(row.get("net_mf_amount")),
-                        "buy_sm_amount": _to_float(row.get("buy_sm_amount")),
-                        "sell_sm_amount": _to_float(row.get("sell_sm_amount")),
-                        "buy_md_amount": _to_float(row.get("buy_md_amount")),
-                        "sell_md_amount": _to_float(row.get("sell_md_amount")),
-                        "buy_lg_amount": _to_float(row.get("buy_lg_amount")),
-                        "sell_lg_amount": _to_float(row.get("sell_lg_amount")),
-                        "buy_elg_amount": _to_float(row.get("buy_elg_amount")),
-                        "sell_elg_amount": _to_float(row.get("sell_elg_amount")),
+                        "symbol": symbol,
+                        "normalized_symbol": resolved.normalized_symbol,
+                        "market": resolved.market,
+                        "granularity": granularity or "stock",
+                        "count": len(records),
+                        "records": records,
                     }
                 )
-            records = _slice_by_date(records, "trade_date", start_date=start_date, end_date=end_date)
-            items.append(
-                {
-                    "symbol": symbol,
-                    "normalized_symbol": resolved.normalized_symbol,
-                    "market": resolved.market,
-                    "granularity": granularity or "stock",
-                    "count": len(records),
-                    "records": records,
-                }
-            )
 
         return {
             "symbols": symbols,
@@ -917,6 +924,10 @@ class ResearchDataRouter:
 
     def _equity_provider_chain(self, resolved: ResolvedInstrument) -> list[Any]:
         chain: list[Any] = []
+        if resolved.market == "a_share":
+            chain.append(TushareResearchProvider())
+            chain.append(YFinanceResearchProvider())
+            return chain
         if resolved.market in {"us_equity", "hk_equity"}:
             chain.append(YFinanceResearchProvider())
         chain.append(TushareResearchProvider())
@@ -944,3 +955,83 @@ class ResearchDataRouter:
             except Exception as exc:
                 warnings.append(f"{provider.name}: {exc}")
         return None, None, warnings
+
+
+def get_research_provider_diagnostics() -> dict[str, Any]:
+    """Summarize research-provider readiness for health checks and debugging."""
+    module_map = {
+        "akshare": "akshare",
+        "yfinance": "yfinance",
+        "tushare": "tushare",
+    }
+    support_map = {
+        "fred": ["macro:us"],
+        "akshare": ["macro:china"],
+        "yfinance": [
+            "equity.get_fundamentals:a_share,us_equity,hk_equity",
+            "equity.get_earnings_calendar:a_share,us_equity,hk_equity",
+        ],
+        "tushare": [
+            "equity.get_fundamentals:a_share,us_equity,hk_equity",
+            "equity.get_earnings_calendar:a_share",
+            "flows.get_connect",
+            "china.get_moneyflow",
+        ],
+    }
+    providers = {
+        "fred": FredMacroProvider(),
+        "akshare": AkshareMacroProvider(),
+        "yfinance": YFinanceResearchProvider(),
+        "tushare": TushareResearchProvider(),
+    }
+
+    diagnostics: dict[str, dict[str, Any]] = {}
+    for provider_name, provider in providers.items():
+        module_name = module_map.get(provider_name)
+        module_available = (
+            importlib.util.find_spec(module_name) is not None
+            if module_name is not None
+            else None
+        )
+        token_configured = (
+            bool(os.getenv("TUSHARE_TOKEN", "").strip())
+            if provider_name == "tushare"
+            else None
+        )
+
+        reason: str | None = None
+        try:
+            available = bool(provider.is_available())
+        except Exception as exc:
+            available = False
+            reason = str(exc)
+
+        if not available and reason is None:
+            if provider_name == "tushare":
+                if not module_available and not token_configured:
+                    reason = "package missing and TUSHARE_TOKEN not configured"
+                elif not module_available:
+                    reason = "package missing"
+                elif not token_configured:
+                    reason = "TUSHARE_TOKEN not configured"
+                else:
+                    reason = "provider reported unavailable"
+            elif module_name is not None and not module_available:
+                reason = "package missing"
+            else:
+                reason = "provider reported unavailable"
+
+        entry: dict[str, Any] = {
+            "available": available,
+            "supports": support_map.get(provider_name, []),
+        }
+        if module_name is not None:
+            entry["module"] = module_name
+            entry["module_available"] = module_available
+        if token_configured is not None:
+            entry["token_configured"] = token_configured
+        if reason:
+            entry["reason"] = reason
+        diagnostics[provider_name] = entry
+
+    return {"providers": diagnostics}

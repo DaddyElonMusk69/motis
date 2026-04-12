@@ -42,15 +42,15 @@ from openai import OpenAI
 from datetime import datetime
 from pathlib import Path
 
-from motis_constants import get_motis_home
+from motis_constants import get_motis_env, get_motis_home
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
+# Load .env from the active Motis home first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from motis_cli.env_loader import load_motis_dotenv
 
-_hermes_home = get_motis_home()
+_motis_home = get_motis_home()
 _project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_motis_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+_loaded_env_paths = load_motis_dotenv(motis_home=_motis_home, project_env=_project_env)
 if _loaded_env_paths:
     for _env_path in _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
@@ -335,6 +335,8 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 
 
 _SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+_STRICT_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+_STRICT_TOOL_NAME_INVALID_CHARS_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
 _BUDGET_WARNING_RE = re.compile(
     r"\[BUDGET(?:\s+WARNING)?:\s+Iteration\s+\d+/\d+\..*?\]",
@@ -691,10 +693,10 @@ class AIAgent:
         self._rate_limit_state: Optional["RateLimitState"] = None
 
         # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
-        # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
+        # both live under ~/.motis/logs/. Idempotent, so gateway mode
         # (which creates a new AIAgent per message) won't duplicate handlers.
         from motis_logging import setup_logging, setup_verbose_logging
-        setup_logging(hermes_home=_hermes_home)
+        setup_logging(motis_home=_motis_home)
 
         if self.verbose_logging:
             setup_verbose_logging()
@@ -879,6 +881,8 @@ class AIAgent:
                       " → ".join(f"{f['model']} ({f['provider']})" for f in self._fallback_chain))
 
         # Get available tools with filtering
+        self._api_tool_name_alias_to_canonical: Dict[str, str] = {}
+        self._api_tool_name_canonical_to_alias: Dict[str, str] = {}
         self.tools = get_tool_definitions(
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
@@ -922,7 +926,7 @@ class AIAgent:
             source = "native Anthropic" if is_native_anthropic else "Claude via OpenRouter"
             print(f"💾 Prompt caching: ENABLED ({source}, {self._cache_ttl} TTL)")
         
-        # Session logging setup - auto-save conversation trajectories for debugging
+        # Session persistence/debug setup.
         self.session_start = datetime.now()
         if session_id:
             # Use provided session ID (e.g., from CLI)
@@ -933,13 +937,15 @@ class AIAgent:
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
         
-        # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
-        hermes_home = get_motis_home()
-        self.logs_dir = hermes_home / "sessions"
+        motis_home = get_motis_home()
+        self.logs_dir = motis_home / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_session_json_enabled = (
+            env_var_enabled("MOTIS_DEBUG_SESSION_JSON")
+        )
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
-        
-        # Track conversation messages for session logging
+
+        # Track conversation messages for DB persistence and optional debug snapshots.
         self._session_messages: List[Dict[str, Any]] = []
         
         # Cached system prompt -- built once per session, only rebuilt on compression
@@ -960,7 +966,7 @@ class AIAgent:
             try:
                 self._session_db.create_session(
                     session_id=self.session_id,
-                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    source=self.platform or (get_motis_env("SESSION_SOURCE", "cli") or "cli"),
                     model=self.model,
                     model_config={
                         "max_iterations": self.max_iterations,
@@ -1013,7 +1019,7 @@ class AIAgent:
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                         user_id=self._user_id,
-                        source=platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                        source=platform or (get_motis_env("SESSION_SOURCE", "cli") or "cli"),
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -1096,6 +1102,7 @@ class AIAgent:
                 _tname = _schema.get("name", "")
                 if _tname:
                     self.valid_tool_names.add(_tname)
+        self._refresh_tool_name_alias_maps()
 
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
@@ -1912,16 +1919,18 @@ class AIAgent:
                 msg["content"] = override
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
-        """Save session state to both JSON log and SQLite on any exit path.
+        """Save session state to SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
+        Optional JSON session snapshots are debug-only and disabled by default.
         Skipped when ``persist_session=False`` (ephemeral helper flows).
         """
         if not self.persist_session:
             return
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
-        self._save_session_log(messages)
+        if self._debug_session_json_enabled:
+            self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
@@ -2436,7 +2445,7 @@ class AIAgent:
 
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
-            if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
+            if env_var_enabled("MOTIS_DUMP_REQUEST_STDOUT"):
                 print(json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str))
 
             return dump_file
@@ -2457,7 +2466,7 @@ class AIAgent:
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
         """
-        Save the full raw session to a JSON file.
+        Save a full raw session snapshot to a JSON file for debugging.
 
         Stores every message exactly as the agent sees it: user messages,
         assistant messages (with reasoning, finish_reason, tool_calls),
@@ -2466,13 +2475,16 @@ class AIAgent:
 
         REASONING_SCRATCHPAD tags are converted to <think> blocks for consistency.
         Overwritten after each turn so it always reflects the latest state.
+        This is not part of the durable Motis persistence path.
         """
+        if not self._debug_session_json_enabled:
+            return
         messages = messages or self._session_messages
         if not messages:
             return
 
         try:
-            # Clean assistant content for session logs
+            # Clean assistant content for debug snapshots
             cleaned = []
             for msg in messages:
                 if msg.get("role") == "assistant" and msg.get("content"):
@@ -2480,7 +2492,7 @@ class AIAgent:
                     msg["content"] = self._clean_session_content(msg["content"])
                 cleaned.append(msg)
 
-            # Guard: never overwrite a larger session log with fewer messages.
+            # Guard: never overwrite a larger debug snapshot with fewer messages.
             # This protects against data loss when --resume loads a session whose
             # messages weren't fully written to SQLite — the resumed agent starts
             # with partial history and would otherwise clobber the full JSON log.
@@ -2490,7 +2502,7 @@ class AIAgent:
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
                     if existing_count > len(cleaned):
                         logging.debug(
-                            "Skipping session log overwrite: existing has %d messages, current has %d",
+                            "Skipping debug session snapshot overwrite: existing has %d messages, current has %d",
                             existing_count, len(cleaned),
                         )
                         return
@@ -2519,7 +2531,7 @@ class AIAgent:
 
         except Exception as e:
             if self.verbose_logging:
-                logging.warning(f"Failed to save session log: {e}")
+                logging.warning(f"Failed to save debug session snapshot: {e}")
     
     def interrupt(self, message: str = None) -> None:
         """
@@ -2980,13 +2992,23 @@ class AIAgent:
         """
         from difflib import get_close_matches
 
+        canonical = self._canonical_tool_name(tool_name)
+        if canonical in self.valid_tool_names:
+            return canonical
+
         # 1. Lowercase
         lowered = tool_name.lower()
+        canonical_lowered = self._canonical_tool_name(lowered)
+        if canonical_lowered in self.valid_tool_names:
+            return canonical_lowered
         if lowered in self.valid_tool_names:
             return lowered
 
         # 2. Normalize
-        normalized = lowered.replace("-", "_").replace(" ", "_")
+        normalized = lowered.replace("-", "_").replace(" ", "_").replace(".", "_")
+        canonical_normalized = self._canonical_tool_name(normalized)
+        if canonical_normalized in self.valid_tool_names:
+            return canonical_normalized
         if normalized in self.valid_tool_names:
             return normalized
 
@@ -3008,6 +3030,102 @@ class AIAgent:
         if self._memory_store:
             self._memory_store.load_from_disk()
 
+    @staticmethod
+    def _make_api_safe_tool_name(tool_name: str) -> str:
+        """Convert an internal tool name to an OpenAI-compatible function name."""
+        cleaned = _STRICT_TOOL_NAME_INVALID_CHARS_RE.sub("_", str(tool_name or "").strip())
+        return cleaned or "tool"
+
+    def _refresh_tool_name_alias_maps(self) -> None:
+        """Build reversible aliases for providers that reject dotted tool names."""
+        alias_to_canonical: Dict[str, str] = {}
+        canonical_to_alias: Dict[str, str] = {}
+        used_aliases: set[str] = set()
+
+        for item in self.tools or []:
+            fn = item.get("function", {}) if isinstance(item, dict) else {}
+            canonical_name = fn.get("name")
+            if not isinstance(canonical_name, str) or not canonical_name.strip():
+                continue
+            canonical_name = canonical_name.strip()
+
+            alias = canonical_name
+            if not _STRICT_TOOL_NAME_RE.match(alias):
+                alias = self._make_api_safe_tool_name(canonical_name)
+
+            if alias in used_aliases and alias_to_canonical.get(alias) != canonical_name:
+                digest = hashlib.sha1(canonical_name.encode("utf-8", errors="replace")).hexdigest()[:8]
+                alias = f"{alias}_{digest}"
+
+            used_aliases.add(alias)
+            alias_to_canonical[alias] = canonical_name
+            canonical_to_alias[canonical_name] = alias
+
+        self._api_tool_name_alias_to_canonical = alias_to_canonical
+        self._api_tool_name_canonical_to_alias = canonical_to_alias
+
+    def _api_safe_tool_name(self, tool_name: str) -> str:
+        """Return the provider-safe alias for a tool name."""
+        mapping = getattr(self, "_api_tool_name_canonical_to_alias", {}) or {}
+        return mapping.get(tool_name, tool_name)
+
+    def _canonical_tool_name(self, tool_name: str) -> str:
+        """Map a provider-facing alias back to the internal tool name."""
+        mapping = getattr(self, "_api_tool_name_alias_to_canonical", {}) or {}
+        return mapping.get(tool_name, tool_name)
+
+    def _tools_for_api(self, tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
+        """Return tool schemas translated to provider-safe function names."""
+        source_tools = tools if tools is not None else self.tools
+        if not source_tools:
+            return None
+
+        translated: List[Dict[str, Any]] = []
+        for item in source_tools:
+            if not isinstance(item, dict):
+                translated.append(item)
+                continue
+            fn = item.get("function", {})
+            name = fn.get("name")
+            if not isinstance(name, str) or not name.strip():
+                translated.append(item)
+                continue
+            safe_name = self._api_safe_tool_name(name.strip())
+            if safe_name == name:
+                translated.append(item)
+                continue
+            translated.append({
+                **item,
+                "function": {
+                    **fn,
+                    "name": safe_name,
+                },
+            })
+
+        return translated
+
+    def _normalize_assistant_tool_call_names(self, assistant_message: Any) -> Any:
+        """Translate provider-safe tool aliases back to canonical internal names."""
+        tool_calls = getattr(assistant_message, "tool_calls", None)
+        if not tool_calls:
+            return assistant_message
+
+        for tool_call in tool_calls:
+            fn = getattr(tool_call, "function", None)
+            if fn is None:
+                continue
+            raw_name = getattr(fn, "name", None)
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                continue
+            canonical_name = self._canonical_tool_name(raw_name.strip())
+            if canonical_name != raw_name:
+                try:
+                    fn.name = canonical_name
+                except Exception:
+                    pass
+
+        return assistant_message
+
     def _responses_tools(self, tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
         """Convert chat-completions tool schemas to Responses function-tool schemas."""
         source_tools = tools if tools is not None else self.tools
@@ -3022,7 +3140,7 @@ class AIAgent:
                 continue
             converted.append({
                 "type": "function",
-                "name": name,
+                "name": self._api_safe_tool_name(name.strip()),
                 "description": fn.get("description", ""),
                 "strict": False,
                 "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
@@ -4383,8 +4501,10 @@ class AIAgent:
         def _call_chat_completions():
             """Stream a chat completions response."""
             import httpx as _httpx
-            _base_timeout = float(os.getenv("HERMES_API_TIMEOUT", 1800.0))
-            _stream_read_timeout = float(os.getenv("HERMES_STREAM_READ_TIMEOUT", 60.0))
+            _base_timeout = float(get_motis_env("API_TIMEOUT", "1800.0") or "1800.0")
+            _stream_read_timeout = float(
+                get_motis_env("STREAM_READ_TIMEOUT", "60.0") or "60.0"
+            )
             stream_kwargs = {
                 **api_kwargs,
                 "stream": True,
@@ -4531,7 +4651,7 @@ class AIAgent:
                         if name and idx not in tool_gen_notified:
                             tool_gen_notified.add(idx)
                             _fire_first_delta()
-                            self._fire_tool_gen_started(name)
+                            self._fire_tool_gen_started(self._canonical_tool_name(name))
 
                 if chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
@@ -4559,7 +4679,7 @@ class AIAgent:
                         type=tc["type"],
                         extra_content=tc.get("extra_content"),
                         function=SimpleNamespace(
-                            name=tc["function"]["name"],
+                            name=self._canonical_tool_name(tc["function"]["name"]),
                             arguments=arguments,
                         ),
                     ))
@@ -4640,7 +4760,7 @@ class AIAgent:
         def _call():
             import httpx as _httpx
 
-            _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+            _max_stream_retries = int(get_motis_env("STREAM_RETRIES", "2") or "2")
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
@@ -4776,10 +4896,12 @@ class AIAgent:
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
+        _stream_stale_timeout_base = float(
+            get_motis_env("STREAM_STALE_TIMEOUT", "180.0") or "180.0"
+        )
         # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
         # for prefill on large contexts.  Disable the stale detector unless
-        # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
+        # the user explicitly set MOTIS_STREAM_STALE_TIMEOUT.
         if _stream_stale_timeout_base == 180.0 and self.base_url and is_local_endpoint(self.base_url):
             _stream_stale_timeout = float("inf")
             logger.debug("Local provider detected (%s) — stale stream timeout disabled", self.base_url)
@@ -5559,7 +5681,7 @@ class AIAgent:
         api_kwargs = {
             "model": self.model,
             "messages": sanitized_messages,
-            "timeout": float(os.getenv("HERMES_API_TIMEOUT", 1800.0)),
+            "timeout": float(get_motis_env("API_TIMEOUT", "1800.0") or "1800.0"),
         }
         if self._is_qwen_portal():
             api_kwargs["metadata"] = {
@@ -5567,7 +5689,7 @@ class AIAgent:
                 "promptId": str(uuid.uuid4()),
             }
         if self.tools:
-            api_kwargs["tools"] = self.tools
+            api_kwargs["tools"] = self._tools_for_api()
 
         if self.max_tokens is not None:
             if not self._is_qwen_portal():
@@ -5618,9 +5740,10 @@ class AIAgent:
         # uses the context window it was trained for.  Passed via the OpenAI
         # SDK's extra_body → options.num_ctx, which Ollama's OpenAI-compat
         # endpoint forwards to the runner as --ctx-size.
-        if self._ollama_num_ctx:
+        _ollama_num_ctx = getattr(self, "_ollama_num_ctx", None)
+        if _ollama_num_ctx:
             options = extra_body.get("options", {})
-            options["num_ctx"] = self._ollama_num_ctx
+            options["num_ctx"] = _ollama_num_ctx
             extra_body["options"] = options
 
         if self._is_qwen_portal():
@@ -6062,11 +6185,11 @@ class AIAgent:
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                # Update session_log_file to point to the new session's JSON file
+                # Update the debug snapshot path to point to the new session ID.
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
                 self._session_db.create_session(
                     session_id=self.session_id,
-                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    source=self.platform or (get_motis_env("SESSION_SOURCE", "cli") or "cli"),
                     model=self.model,
                     user_id=self._user_id,
                     parent_session_id=old_session_id,
@@ -7114,7 +7237,7 @@ class AIAgent:
         
         # Prefill messages (few-shot priming) are injected at API-call time only,
         # never stored in the messages list. This keeps them ephemeral: they won't
-        # be saved to session DB, session logs, or batch trajectories, but they're
+        # be saved to session DB, debug snapshots, or batch trajectories, but they're
         # automatically re-applied on every API call (including session continuations).
         
         # Track user turns for memory flush and periodic nudge logic
@@ -7532,7 +7655,7 @@ class AIAgent:
                     except Exception:
                         pass
 
-                    if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                    if env_var_enabled("MOTIS_DUMP_REQUESTS"):
                         self._dump_api_request_debug(api_kwargs, reason="preflight")
 
                     # Always prefer the streaming path — even without stream
@@ -8703,6 +8826,8 @@ class AIAgent:
                     )
                 else:
                     assistant_message = response.choices[0].message
+
+                assistant_message = self._normalize_assistant_tool_call_names(assistant_message)
                 
                 # Normalize content to string — some OpenAI-compatible servers
                 # (llama-server, etc.) return content as a dict or list instead
@@ -9133,9 +9258,10 @@ class AIAgent:
                         # to the new session (see preflight compression comment).
                         conversation_history = None
                     
-                    # Save session log incrementally (so progress is visible even if interrupted)
+                    # Refresh in-memory history and optional debug snapshot.
                     self._session_messages = messages
-                    self._save_session_log(messages)
+                    if self._debug_session_json_enabled:
+                        self._save_session_log(messages)
                     
                     # Continue loop for next response
                     continue

@@ -322,7 +322,7 @@ name: my-skill
 description: Brief description (shown in skill search results)
 version: 1.0.0
 author: Your Name
-license: MIT
+license: Proprietary
 platforms: [macos, linux]          # Optional — restrict to specific OS platforms
                                    #   Valid: macos, linux, windows
                                    #   Omit to load on all platforms (default)
@@ -653,4 +653,6 @@ test(tools): add unit tests for file_operations
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+Unless explicitly agreed otherwise in writing, contributions submitted to this
+directory are intended for inclusion in the proprietary Motis Agent demo and
+are governed by the terms in [LICENSE](LICENSE).

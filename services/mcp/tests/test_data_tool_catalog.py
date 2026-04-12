@@ -60,6 +60,6 @@ def test_data_tool_names_are_unique_across_active_and_planned_catalogs():
 def test_provider_routing_plan_keeps_structured_free_first_fallbacks():
     market_plan = DATA_PROVIDER_ROUTING_PLAN["structured_market_routing"]
 
-    assert market_plan["a_share"] == ["tushare", "akshare"]
+    assert market_plan["a_share"] == ["tushare", "yfinance", "akshare"]
     assert market_plan["us_equity"] == ["yfinance", "akshare"]
     assert market_plan["crypto"] == ["okx", "ccxt"]

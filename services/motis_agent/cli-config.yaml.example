@@ -687,19 +687,20 @@ stt:
 #   max_ms: 2500     # Max delay (custom mode only)
 
 # =============================================================================
-# Session Logging
+# Session Snapshots
 # =============================================================================
-# Session trajectories are automatically saved to logs/ directory.
-# Each session creates: logs/session_YYYYMMDD_HHMMSS_UUID.json
+# Durable conversations live in state.db.
+# Optional per-session JSON snapshots can be enabled for debugging by setting:
+#   MOTIS_DEBUG_SESSION_JSON=1
 #
 # The session ID is displayed in the welcome banner for easy reference.
-# Logs contain full conversation history in trajectory format:
+# Debug snapshots contain full conversation history in trajectory format:
 # - System prompt, user messages, assistant responses
 # - Tool calls with inputs/outputs
 # - Timestamps for debugging
 #
-# No configuration needed - logging is always enabled.
-# To disable, you would need to modify the source code.
+# Snapshot files are written to logs/session_YYYYMMDD_HHMMSS_UUID.json only
+# when MOTIS_DEBUG_SESSION_JSON is enabled.
 
 # =============================================================================
 # Code Execution Sandbox (Programmatic Tool Calling)

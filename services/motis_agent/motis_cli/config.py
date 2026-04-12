@@ -1,9 +1,9 @@
 """
 Configuration management for Motis.
 
-Config files are stored in ~/.hermes/ for compatibility:
-- ~/.hermes/config.yaml  - All settings (model, toolsets, terminal, etc.)
-- ~/.hermes/.env         - API keys and secrets
+Config files are stored in the active Motis home for compatibility:
+- ~/.motis/config.yaml  - All settings (model, toolsets, terminal, etc.)
+- ~/.motis/.env         - API keys and secrets
 
 This module provides:
 - motis config          - Show current configuration
@@ -65,7 +65,10 @@ _MANAGED_SYSTEM_NAMES = {
 
 def get_managed_system() -> Optional[str]:
     """Return the package manager owning this install, if any."""
-    raw = os.getenv("HERMES_MANAGED", "").strip()
+    raw = (
+        os.getenv("MOTIS_MANAGED", "").strip()
+        or os.getenv("HERMES_MANAGED", "").strip()
+    )
     if raw:
         normalized = raw.lower()
         if normalized in _MANAGED_TRUE_VALUES:
@@ -106,7 +109,10 @@ def recommended_update_command() -> str:
 def format_managed_message(action: str = "modify this Motis installation") -> str:
     """Build a user-facing error for managed installs."""
     managed_system = get_managed_system() or "a package manager"
-    raw = os.getenv("HERMES_MANAGED", "").strip().lower()
+    raw = (
+        os.getenv("MOTIS_MANAGED", "").strip().lower()
+        or os.getenv("HERMES_MANAGED", "").strip().lower()
+    )
 
     if managed_system == "NixOS":
         env_hint = "true" if raw in _MANAGED_TRUE_VALUES else raw or "true"
@@ -141,7 +147,18 @@ def managed_error(action: str = "modify configuration"):
 # =============================================================================
 
 # Re-export from motis_constants — canonical definition lives there.
-from motis_constants import get_motis_home, get_motis_home  # noqa: F811,E402
+from motis_constants import get_motis_home  # noqa: E402
+
+
+def _compat_env_keys(key: str) -> tuple[str, ...]:
+    """Return Motis/Hermes-compatible key lookup order for a config env var."""
+    if key.startswith("MOTIS_"):
+        suffix = key[len("MOTIS_"):]
+        return (f"MOTIS_{suffix}", f"HERMES_{suffix}")
+    if key.startswith("HERMES_"):
+        suffix = key[len("HERMES_"):]
+        return (f"MOTIS_{suffix}", f"HERMES_{suffix}")
+    return (key,)
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -2340,14 +2357,16 @@ def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
 
 
 def get_env_value(key: str) -> Optional[str]:
-    """Get a value from ~/.hermes/.env or environment."""
-    # Check environment first
-    if key in os.environ:
-        return os.environ[key]
-    
-    # Then check .env file
+    """Get a value from the active Motis .env or environment."""
+    for candidate in _compat_env_keys(key):
+        if candidate in os.environ:
+            return os.environ[candidate]
+
     env_vars = load_env()
-    return env_vars.get(key)
+    for candidate in _compat_env_keys(key):
+        if candidate in env_vars:
+            return env_vars[candidate]
+    return None
 
 
 # =============================================================================

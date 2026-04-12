@@ -15,6 +15,9 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, status
 
+from motis_data_mcp.providers.market import get_market_provider_diagnostics
+from motis_data_mcp.providers.research import get_research_provider_diagnostics
+from motis_data_mcp.providers.router import get_networking_router
 from motis_data_mcp.settings import settings
 from motis_data_mcp.tools import DATA_TOOLS, dispatch_data
 
@@ -70,11 +73,21 @@ def _verify_agent_token(x_agent_token: str | None) -> None:
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, Any]:
+    router = get_networking_router()
     return {
         "status": "ok",
         "service": "motis_data_mcp",
         "transport": "http",
         "tool_count": len(DATA_TOOLS),
+        "routing": {
+            "search_provider": getattr(router.search_provider, "name", type(router.search_provider).__name__),
+            "extract_provider": getattr(router.extract_provider, "name", type(router.extract_provider).__name__),
+            "crawl_provider": getattr(router.crawl_provider, "name", type(router.crawl_provider).__name__),
+        },
+        "providers": {
+            "market": get_market_provider_diagnostics(),
+            "research": get_research_provider_diagnostics(),
+        },
     }
 
 

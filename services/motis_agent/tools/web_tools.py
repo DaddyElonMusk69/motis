@@ -1,51 +1,17 @@
 #!/usr/bin/env python3
 """
-Standalone Web Tools Module
+MCP-backed web tools for the Motis runtime.
 
-This module provides generic web tools that work with multiple backend providers.
-Backend is selected during ``hermes tools`` setup (web.backend in config.yaml).
-
-Available tools:
-- web_search_tool: Search the web for information
-- web_extract_tool: Extract content from specific web pages
-- web_crawl_tool: Crawl websites with specific instructions
-
-Backend compatibility:
-- Exa: https://exa.ai (search, extract)
-- Firecrawl: https://docs.firecrawl.dev/introduction (search, extract, crawl)
-- Parallel: https://docs.parallel.ai (search, extract)
-- Tavily: https://tavily.com (search, extract, crawl)
-
-LLM Processing:
-- Uses OpenRouter API with Gemini 3 Flash Preview for intelligent content extraction
-- Extracts key excerpts and creates markdown summaries to reduce token usage
-
-Debug Mode:
-- Set WEB_TOOLS_DEBUG=true to enable detailed logging
-- Creates web_tools_debug_UUID.json in ./logs directory
-- Captures all tool calls, results, and compression metrics
-
-Usage:
-    from web_tools import web_search_tool, web_extract_tool, web_crawl_tool
-    
-    # Search the web
-    results = web_search_tool("Python machine learning libraries", limit=3)
-    
-    # Extract content from URLs  
-    content = web_extract_tool(["https://example.com"], format="markdown")
-    
-    # Crawl a website
-    crawl_data = web_crawl_tool("example.com", "Find contact information")
+The active Motis networking boundary is the Motis Data MCP service. Search,
+URL extraction, and site crawling all route through that service instead of
+calling provider SDKs directly from the agent runtime.
 """
 
 import json
 import logging
 import os
 import re
-import sys
 import asyncio
-import threading
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 import httpx
 try:
@@ -64,7 +30,6 @@ from tools.website_policy import check_website_access
 logger = logging.getLogger(__name__)
 
 _DATA_MCP_TIMEOUT = 30.0
-_LOCAL_DATA_DISPATCH = None
 
 
 def _get_data_mcp_url() -> str:
@@ -85,100 +50,44 @@ def _build_data_mcp_headers(*, session_id: Optional[str] = None) -> Dict[str, st
     return headers
 
 
-def _decode_data_mcp_payload(result: Any) -> Dict[str, Any]:
-    if isinstance(result, dict):
-        return result
-
-    if isinstance(result, list):
-        for item in result:
-            text = getattr(item, "text", None)
-            if not text:
-                continue
-            payload = json.loads(text)
-            if isinstance(payload, dict):
-                return payload
-
-    raise ValueError("Motis Data MCP returned an unsupported payload shape")
-
-
-def _resolve_local_data_dispatch():
-    global _LOCAL_DATA_DISPATCH
-    if _LOCAL_DATA_DISPATCH is not None:
-        return _LOCAL_DATA_DISPATCH
-
-    try:
-        from motis_data_mcp.tools import dispatch_data as local_dispatch_data
-    except ModuleNotFoundError:
-        service_root = Path(__file__).resolve().parents[2] / "mcp"
-        if str(service_root) not in sys.path:
-            sys.path.insert(0, str(service_root))
-        from motis_data_mcp.tools import dispatch_data as local_dispatch_data
-
-    _LOCAL_DATA_DISPATCH = local_dispatch_data
-    return _LOCAL_DATA_DISPATCH
-
-
-def _run_coro_blocking(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result_box: Dict[str, Any] = {}
-    error_box: Dict[str, BaseException] = {}
-
-    def _runner() -> None:
-        try:
-            result_box["value"] = asyncio.run(coro)
-        except BaseException as exc:  # pragma: no cover - defensive bridge
-            error_box["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join()
-
-    if "error" in error_box:
-        raise error_box["error"]
-    return result_box.get("value")
+def _require_data_mcp_url() -> str:
+    base_url = _get_data_mcp_url()
+    if base_url:
+        return base_url
+    raise ValueError(
+        "Motis web tools require DATA_MCP_URL (preferred) or MCP_URL to point "
+        "to a running motis-data-mcp-http service."
+    )
 
 
 def _call_data_mcp_sync(tool_name: str, payload: Dict[str, Any], *, session_id: Optional[str] = None) -> Dict[str, Any]:
-    base_url = _get_data_mcp_url()
-    if base_url:
-        response = httpx.post(
-            f"{base_url}/tools/{tool_name}",
-            json=payload,
-            headers=_build_data_mcp_headers(session_id=session_id),
-            timeout=_DATA_MCP_TIMEOUT,
-            follow_redirects=True,
-            # Local MCP calls should bypass ambient proxy/system trust settings.
-            trust_env=False,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    dispatch_data = _resolve_local_data_dispatch()
-    return _decode_data_mcp_payload(_run_coro_blocking(dispatch_data(tool_name, payload)))
+    base_url = _require_data_mcp_url()
+    response = httpx.post(
+        f"{base_url}/tools/{tool_name}",
+        json=payload,
+        headers=_build_data_mcp_headers(session_id=session_id),
+        timeout=_DATA_MCP_TIMEOUT,
+        follow_redirects=True,
+        trust_env=False,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 async def _call_data_mcp_async(tool_name: str, payload: Dict[str, Any], *, session_id: Optional[str] = None) -> Dict[str, Any]:
-    base_url = _get_data_mcp_url()
-    if base_url:
-        async with httpx.AsyncClient(
-            timeout=_DATA_MCP_TIMEOUT,
-            follow_redirects=True,
-            trust_env=False,
-        ) as client:
-            response = await client.post(
-                f"{base_url}/tools/{tool_name}",
-                json=payload,
-                headers=_build_data_mcp_headers(session_id=session_id),
-            )
-            response.raise_for_status()
-            return response.json()
-
-    dispatch_data = _resolve_local_data_dispatch()
-    return _decode_data_mcp_payload(await dispatch_data(tool_name, payload))
+    base_url = _require_data_mcp_url()
+    async with httpx.AsyncClient(
+        timeout=_DATA_MCP_TIMEOUT,
+        follow_redirects=True,
+        trust_env=False,
+    ) as client:
+        response = await client.post(
+            f"{base_url}/tools/{tool_name}",
+            json=payload,
+            headers=_build_data_mcp_headers(session_id=session_id),
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _normalize_search_result(result: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -1564,28 +1473,7 @@ async def web_crawl_tool(
     model: Optional[str] = None,
     min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION
 ) -> str:
-    """
-    Crawl a website with specific instructions using available crawling API backend.
-    
-    This function provides a generic interface for web crawling that can work
-    with multiple backends. Currently uses Firecrawl.
-    
-    Args:
-        url (str): The base URL to crawl (can include or exclude https://)
-        instructions (str): Instructions for what to crawl/extract using LLM intelligence (optional)
-        depth (str): Depth of extraction ("basic" or "advanced", default: "basic")
-        use_llm_processing (bool): Whether to process content with LLM for summarization (default: True)
-        model (Optional[str]): The model to use for LLM processing (defaults to current auxiliary backend model)
-        min_length (int): Minimum content length to trigger LLM processing (default: 5000)
-    
-    Returns:
-        str: JSON string containing crawled content. If LLM processing is enabled and successful,
-             the 'content' field will contain the processed markdown summary instead of raw content.
-             Each page is processed individually.
-    
-    Raises:
-        Exception: If crawling fails or API key is not set
-    """
+    """Crawl a site through the Motis Data MCP boundary."""
     debug_call_data = {
         "parameters": {
             "url": url,
@@ -1605,249 +1493,104 @@ async def web_crawl_tool(
     }
     
     try:
-        effective_model = model or _get_default_summarizer_model()
-        auxiliary_available = check_auxiliary_model()
-        backend = _get_backend()
-
-        # Tavily supports crawl via its /crawl endpoint
-        if backend == "tavily":
-            # Ensure URL has protocol
-            if not url.startswith(('http://', 'https://')):
-                url = f'https://{url}'
-
-            # SSRF protection — block private/internal addresses
-            if not is_safe_url(url):
-                return json.dumps({"results": [{"url": url, "title": "", "content": "",
-                    "error": "Blocked: URL targets a private or internal network address"}]}, ensure_ascii=False)
-
-            # Website policy check
-            blocked = check_website_access(url)
-            if blocked:
-                logger.info("Blocked web_crawl for %s by rule %s", blocked["host"], blocked["rule"])
-                return json.dumps({"results": [{"url": url, "title": "", "content": "", "error": blocked["message"],
-                    "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]}}]}, ensure_ascii=False)
-
-            from tools.interrupt import is_interrupted as _is_int
-            if _is_int():
-                return tool_error("Interrupted", success=False)
-
-            logger.info("Tavily crawl: %s", url)
-            payload: Dict[str, Any] = {
-                "url": url,
-                "limit": 20,
-                "extract_depth": depth,
-            }
-            if instructions:
-                payload["instructions"] = instructions
-            raw = _tavily_request("crawl", payload)
-            results = _normalize_tavily_documents(raw, fallback_url=url)
-
-            response = {"results": results}
-            # Fall through to the shared LLM processing and trimming below
-            # (skip the Firecrawl-specific crawl logic)
-            pages_crawled = len(response.get('results', []))
-            logger.info("Crawled %d pages", pages_crawled)
-            debug_call_data["pages_crawled"] = pages_crawled
-            debug_call_data["original_response_size"] = len(json.dumps(response))
-
-            # Process each result with LLM if enabled
-            if use_llm_processing and auxiliary_available:
-                logger.info("Processing crawled content with LLM (parallel)...")
-                debug_call_data["processing_applied"].append("llm_processing")
-
-                async def _process_tavily_crawl(result):
-                    page_url = result.get('url', 'Unknown URL')
-                    title = result.get('title', '')
-                    content = result.get('content', '')
-                    if not content:
-                        return result, None, "no_content"
-                    original_size = len(content)
-                    processed = await process_content_with_llm(content, page_url, title, effective_model, min_length)
-                    if processed:
-                        result['raw_content'] = content
-                        result['content'] = processed
-                        metrics = {"url": page_url, "original_size": original_size, "processed_size": len(processed),
-                                   "compression_ratio": len(processed) / original_size if original_size else 1.0, "model_used": effective_model}
-                        return result, metrics, "processed"
-                    metrics = {"url": page_url, "original_size": original_size, "processed_size": original_size,
-                               "compression_ratio": 1.0, "model_used": None, "reason": "content_too_short"}
-                    return result, metrics, "too_short"
-
-                tasks = [_process_tavily_crawl(r) for r in response.get('results', [])]
-                processed_results = await asyncio.gather(*tasks)
-                for result, metrics, status in processed_results:
-                    if status == "processed":
-                        debug_call_data["compression_metrics"].append(metrics)
-                        debug_call_data["pages_processed_with_llm"] += 1
-
-            if use_llm_processing and not auxiliary_available:
-                logger.warning("LLM processing requested but no auxiliary model available, returning raw content")
-                debug_call_data["processing_applied"].append("llm_processing_unavailable")
-
-            trimmed_results = [{"url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""), "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {})} for r in response.get("results", [])]
-            result_json = json.dumps({"results": trimmed_results}, indent=2, ensure_ascii=False)
-            cleaned_result = clean_base64_images(result_json)
-            debug_call_data["final_response_size"] = len(cleaned_result)
-            _debug.log_call("web_crawl_tool", debug_call_data)
-            _debug.save()
-            return cleaned_result
-
-        # web_crawl requires Firecrawl — Parallel has no crawl API
-        if not check_firecrawl_api_key():
-            return json.dumps({
-                "error": "web_crawl requires Firecrawl. Set FIRECRAWL_API_KEY or FIRECRAWL_API_URL, or use web_search + web_extract instead.",
-                "success": False,
-            }, ensure_ascii=False)
-
-        # Ensure URL has protocol
         if not url.startswith(('http://', 'https://')):
             url = f'https://{url}'
-            logger.info("Added https:// prefix to URL: %s", url)
-        
-        instructions_text = f" with instructions: '{instructions}'" if instructions else ""
-        logger.info("Crawling %s%s", url, instructions_text)
-        
-        # SSRF protection — block private/internal addresses
+
         if not is_safe_url(url):
             return json.dumps({"results": [{"url": url, "title": "", "content": "",
                 "error": "Blocked: URL targets a private or internal network address"}]}, ensure_ascii=False)
 
-        # Website policy check — block before crawling
         blocked = check_website_access(url)
         if blocked:
             logger.info("Blocked web_crawl for %s by rule %s", blocked["host"], blocked["rule"])
             return json.dumps({"results": [{"url": url, "title": "", "content": "", "error": blocked["message"],
                 "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]}}]}, ensure_ascii=False)
 
-        # Use Firecrawl's v2 crawl functionality
-        # Docs: https://docs.firecrawl.dev/features/crawl
-        # The crawl() method automatically waits for completion and returns all data
-        
-        # Build crawl parameters - keep it simple
-        crawl_params = {
-            "limit": 20,  # Limit number of pages to crawl
-            "scrape_options": {
-                "formats": ["markdown"]  # Just markdown for simplicity
-            }
-        }
-        
-        # Note: The 'prompt' parameter is not documented for crawl
-        # Instructions are typically used with the Extract endpoint, not Crawl
-        if instructions:
-            logger.info("Instructions parameter ignored (not supported in crawl API)")
-        
         from tools.interrupt import is_interrupted as _is_int
         if _is_int():
             return tool_error("Interrupted", success=False)
 
-        try:
-            crawl_result = _get_firecrawl_client().crawl(
-                url=url,
-                **crawl_params
+        effective_model = model or _get_default_summarizer_model()
+        auxiliary_available = check_auxiliary_model()
+        logger.info("Crawling site through Motis Data MCP: %s", url)
+        response_payload = await _call_data_mcp_async(
+            "web_crawl",
+            {
+                "root_url": url,
+                "prompt": instructions,
+                "mode": "extract",
+                "max_pages": 20 if str(depth or "").strip().lower() == "advanced" else 5,
+                "same_domain_only": True,
+            },
+        )
+
+        if response_payload.get("status") != "ok":
+            error = response_payload.get("error") or {}
+            raise ValueError(
+                error.get("message")
+                or f"Motis Data MCP returned status '{response_payload.get('status', 'error')}' for web_crawl"
             )
-        except Exception as e:
-            logger.debug("Crawl API call failed: %s", e)
-            raise
 
-        pages: List[Dict[str, Any]] = []
-        
-        # Process crawl results - the crawl method returns a CrawlJob object with data attribute
-        data_list = []
-        
-        # The crawl_result is a CrawlJob object with a 'data' attribute containing list of Document objects
-        if hasattr(crawl_result, 'data'):
-            data_list = crawl_result.data if crawl_result.data else []
-            logger.info("Status: %s", getattr(crawl_result, 'status', 'unknown'))
-            logger.info("Retrieved %d pages", len(data_list))
-            
-            # Debug: Check other attributes if no data
-            if not data_list:
-                logger.debug("CrawlJob attributes: %s", [attr for attr in dir(crawl_result) if not attr.startswith('_')])
-                logger.debug("Status: %s", getattr(crawl_result, 'status', 'N/A'))
-                logger.debug("Total: %s", getattr(crawl_result, 'total', 'N/A'))
-                logger.debug("Completed: %s", getattr(crawl_result, 'completed', 'N/A'))
-                
-        elif isinstance(crawl_result, dict) and 'data' in crawl_result:
-            data_list = crawl_result.get("data", [])
-        else:
-            logger.warning("Unexpected crawl result type")
-            logger.debug("Result type: %s", type(crawl_result))
-            if hasattr(crawl_result, '__dict__'):
-                logger.debug("Result attributes: %s", list(crawl_result.__dict__.keys()))
-        
-        for item in data_list:
-            # Process each crawled page - properly handle object serialization
-            page_url = "Unknown URL"
-            title = ""
-            content_markdown = None
-            content_html = None
-            metadata = {}
-            
-            # Extract data from the item
-            if hasattr(item, 'model_dump'):
-                # Pydantic model - use model_dump to get dict
-                item_dict = item.model_dump()
-                content_markdown = item_dict.get('markdown')
-                content_html = item_dict.get('html')
-                metadata = item_dict.get('metadata', {})
-            elif hasattr(item, '__dict__'):
-                # Regular object with attributes
-                content_markdown = getattr(item, 'markdown', None)
-                content_html = getattr(item, 'html', None)
-                
-                # Handle metadata - convert to dict if it's an object
-                metadata_obj = getattr(item, 'metadata', {})
-                if hasattr(metadata_obj, 'model_dump'):
-                    metadata = metadata_obj.model_dump()
-                elif hasattr(metadata_obj, '__dict__'):
-                    metadata = metadata_obj.__dict__
-                elif isinstance(metadata_obj, dict):
-                    metadata = metadata_obj
-                else:
-                    metadata = {}
-            elif isinstance(item, dict):
-                # Already a dictionary
-                content_markdown = item.get('markdown')
-                content_html = item.get('html')
-                metadata = item.get('metadata', {})
-            
-            # Ensure metadata is a dict (not an object)
-            if not isinstance(metadata, dict):
-                if hasattr(metadata, 'model_dump'):
-                    metadata = metadata.model_dump()
-                elif hasattr(metadata, '__dict__'):
-                    metadata = metadata.__dict__
-                else:
-                    metadata = {}
-            
-            # Extract URL and title from metadata
-            page_url = metadata.get("sourceURL", metadata.get("url", "Unknown URL"))
-            title = metadata.get("title", "")
-            
-            # Re-check crawled page URL against policy
-            page_blocked = check_website_access(page_url)
-            if page_blocked:
-                logger.info("Blocked crawled page %s by rule %s", page_blocked["host"], page_blocked["rule"])
-                pages.append({
-                    "url": page_url, "title": title, "content": "", "raw_content": "",
-                    "error": page_blocked["message"],
-                    "blocked_by_policy": {"host": page_blocked["host"], "rule": page_blocked["rule"], "source": page_blocked["source"]},
-                })
+        response_data = dict(response_payload.get("data") or {})
+        raw_pages = response_data.get("pages")
+        if not isinstance(raw_pages, list):
+            raw_pages = []
+
+        documents: List[Dict[str, Any]] = []
+        for raw_document in raw_pages:
+            document = _normalize_document_dict(raw_document)
+            final_url = str(document.get("final_url") or document.get("url") or "")
+            if final_url and not is_safe_url(final_url):
+                documents.append(
+                    _build_error_document(
+                        final_url,
+                        "Blocked: URL targets a private or internal network address",
+                        title=str(document.get("title") or ""),
+                        final_url=final_url,
+                    )
+                )
                 continue
+            if final_url:
+                final_blocked = check_website_access(final_url)
+                if final_blocked:
+                    logger.info(
+                        "Blocked crawled page %s by rule %s",
+                        final_blocked["host"],
+                        final_blocked["rule"],
+                    )
+                    documents.append(
+                        _build_error_document(
+                            final_url,
+                            final_blocked["message"],
+                            title=str(document.get("title") or ""),
+                            final_url=final_url,
+                            metadata_extra={
+                                "blocked_by_policy": {
+                                    "host": final_blocked["host"],
+                                    "rule": final_blocked["rule"],
+                                    "source": final_blocked["source"],
+                                }
+                            },
+                        )
+                    )
+                    continue
+            documents.append(document)
 
-            # Choose content (prefer markdown)
-            content = content_markdown or content_html or ""
-            
-            pages.append({
-                "url": page_url,
-                "title": title,
-                "content": content,
-                "raw_content": content,
-                "metadata": metadata  # Now guaranteed to be a dict
-            })
-
-        response = {"results": pages}
+        results = [_document_to_result(document) for document in documents]
+        response = {
+            "success": True,
+            "status": response_payload.get("status"),
+            "service": response_payload.get("service"),
+            "tool": response_payload.get("tool"),
+            "provider": response_payload.get("provider"),
+            "warnings": list(response_payload.get("warnings") or []),
+            "error": response_payload.get("error"),
+            "data": {
+                **response_data,
+                "pages": documents,
+            },
+            "results": results,
+        }
         
         pages_crawled = len(response.get('results', []))
         logger.info("Crawled %d pages", pages_crawled)
@@ -1861,7 +1604,7 @@ async def web_crawl_tool(
             debug_call_data["processing_applied"].append("llm_processing")
             
             # Prepare tasks for parallel processing
-            async def process_single_crawl_result(result):
+            async def process_single_crawl_result(index: int, result: Dict[str, Any]):
                 """Process a single crawl result with LLM and return updated result with metrics."""
                 page_url = result.get('url', 'Unknown URL')
                 title = result.get('title', '')
@@ -1884,6 +1627,9 @@ async def web_crawl_tool(
                     # Update result with processed content
                     result['raw_content'] = content
                     result['content'] = processed
+                    response["data"]["pages"][index]["content"] = processed
+                    response["data"]["pages"][index].setdefault("metadata", {})
+                    response["data"]["pages"][index]["metadata"]["summarized"] = True
                     
                     metrics = {
                         "url": page_url,
@@ -1906,7 +1652,7 @@ async def web_crawl_tool(
             
             # Run all LLM processing in parallel
             results_list = response.get('results', [])
-            tasks = [process_single_crawl_result(result) for result in results_list]
+            tasks = [process_single_crawl_result(idx, result) for idx, result in enumerate(results_list)]
             processed_results = await asyncio.gather(*tasks)
             
             # Collect metrics and print results
@@ -1925,13 +1671,11 @@ async def web_crawl_tool(
             if use_llm_processing and not auxiliary_available:
                 logger.warning("LLM processing requested but no auxiliary model available, returning raw content")
                 debug_call_data["processing_applied"].append("llm_processing_unavailable")
-            # Print summary of crawled pages for debugging (original behavior)
             for result in response.get('results', []):
                 page_url = result.get('url', 'Unknown URL')
-                content_length = len(result.get('content', ''))
+                content_length = len(result.get('raw_content', ''))
                 logger.info("%s (%d characters)", page_url, content_length)
         
-        # Trim output to minimal fields per entry: title, content, error
         trimmed_results = [
             {
                 "url": r.get("url", ""),
@@ -1942,10 +1686,22 @@ async def web_crawl_tool(
             }
             for r in response.get("results", [])
         ]
-        trimmed_response = {"results": trimmed_results}
+        trimmed_response = {
+            "success": response.get("success", False),
+            "status": response.get("status"),
+            "service": response.get("service"),
+            "tool": response.get("tool"),
+            "provider": response.get("provider"),
+            "warnings": response.get("warnings", []),
+            "error": response.get("error"),
+            "data": {
+                **dict(response.get("data") or {}),
+                "pages": response.get("data", {}).get("pages", []),
+            },
+            "results": trimmed_results,
+        }
         
         result_json = json.dumps(trimmed_response, indent=2, ensure_ascii=False)
-        # Clean base64 images from crawled content
         cleaned_result = clean_base64_images(result_json)
         
         debug_call_data["final_response_size"] = len(cleaned_result)
@@ -1982,14 +1738,8 @@ def check_firecrawl_api_key() -> bool:
 
 
 def check_web_api_key() -> bool:
-    """Check whether Motis Data MCP is reachable or available for local fallback."""
-    if _get_data_mcp_url():
-        return True
-    try:
-        _resolve_local_data_dispatch()
-        return True
-    except Exception:
-        return False
+    """Check whether the Motis Data MCP transport is configured."""
+    return bool(_get_data_mcp_url())
 
 
 def check_auxiliary_model() -> bool:
@@ -2017,15 +1767,12 @@ if __name__ == "__main__":
 
     if web_available:
         data_mcp_url = _get_data_mcp_url()
-        if data_mcp_url:
-            print(f"✅ Motis Data MCP URL: {data_mcp_url}")
-        else:
-            print("✅ Motis Data MCP available via local in-process fallback")
+        print(f"✅ Motis Data MCP URL: {data_mcp_url}")
     else:
         print("❌ Motis Data MCP is not configured")
         print(
             "Set DATA_MCP_URL to a running motis-data-mcp-http service, "
-            "or ensure services/mcp is importable for local fallback."
+            "or use MCP_URL as a compatibility alias."
         )
 
     if not auxiliary_model_available:

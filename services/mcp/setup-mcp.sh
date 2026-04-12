@@ -98,6 +98,25 @@ if ! UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync "${sync_args[@]}" --locked 2>&1 
 fi
 rm -f "$sync_log"
 
+log_info "Verifying MCP structured-data dependencies..."
+verify_log="$(mktemp)"
+if ! "$VENV_DIR/bin/python" - <<'PY' >"$verify_log"; then
+import importlib.util
+
+required = ["ddgs", "pandas", "yfinance", "akshare", "tushare"]
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    print(", ".join(missing))
+    raise SystemExit(1)
+PY
+  missing_modules="$(cat "$verify_log")"
+  rm -f "$verify_log"
+  printf 'Motis MCP environment is missing required packages: %s\n' "$missing_modules" >&2
+  printf 'Run `uv lock` at the repo root and rerun ./setup-mcp.sh.\n' >&2
+  exit 1
+fi
+rm -f "$verify_log"
+
 log_success "Standalone Motis MCP environment is ready."
 printf '\nNext steps:\n'
 printf '  1. Run ./motis-mcp data-http\n'

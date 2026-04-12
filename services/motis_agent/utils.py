@@ -1,4 +1,4 @@
-"""Shared utility functions for hermes-agent."""
+"""Shared utility functions for Motis."""
 
 import json
 import os
@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Union
 
 import yaml
+from motis_constants import get_motis_env
 
 
 TRUTHY_STRINGS = frozenset({"1", "true", "yes", "on"})
@@ -24,7 +25,9 @@ def is_truthy_value(value: Any, default: bool = False) -> bool:
 
 
 def env_var_enabled(name: str, default: str = "") -> bool:
-    """Return True when an environment variable is set to a truthy value."""
+    """Return True when a Motis/Hermes environment variable is truthy."""
+    if name.startswith(("MOTIS_", "HERMES_")):
+        return is_truthy_value(get_motis_env(name, default), default=False)
     return is_truthy_value(os.getenv(name, default), default=False)
 
 

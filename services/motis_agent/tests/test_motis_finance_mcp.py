@@ -243,3 +243,34 @@ def test_structured_research_tools_route_through_data_mcp(monkeypatch) -> None:
     assert earnings_payload["events"][0]["event_date"] == "2026-05-02"
     assert connect_payload["daily_flows"][0]["flow_mn"] == 321.0
     assert moneyflow_payload["items"][0]["records"][0]["net_mf_amount"] == 66.0
+
+
+def test_check_motis_data_mcp_uses_configured_url_only(monkeypatch) -> None:
+    monkeypatch.delenv("DATA_MCP_URL", raising=False)
+    monkeypatch.delenv("MCP_URL", raising=False)
+    assert finance_tools.check_motis_data_mcp() is False
+
+    monkeypatch.setenv("MCP_URL", "http://localhost:8002/")
+    assert finance_tools.check_motis_data_mcp() is True
+
+
+def test_mcp_backed_finance_tools_hide_without_data_mcp(monkeypatch) -> None:
+    monkeypatch.delenv("DATA_MCP_URL", raising=False)
+    monkeypatch.delenv("MCP_URL", raising=False)
+
+    defs_without_mcp = finance_tools.registry.get_definitions(
+        {"data.ticker", "options_pricing"},
+        quiet=True,
+    )
+    names_without_mcp = {item["function"]["name"] for item in defs_without_mcp}
+
+    monkeypatch.setenv("DATA_MCP_URL", "http://localhost:8002")
+    defs_with_mcp = finance_tools.registry.get_definitions(
+        {"data.ticker", "options_pricing"},
+        quiet=True,
+    )
+    names_with_mcp = {item["function"]["name"] for item in defs_with_mcp}
+
+    assert "options_pricing" in names_without_mcp
+    assert "data.ticker" not in names_without_mcp
+    assert {"data.ticker", "options_pricing"}.issubset(names_with_mcp)

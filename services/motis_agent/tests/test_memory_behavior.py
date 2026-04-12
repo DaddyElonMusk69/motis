@@ -40,7 +40,7 @@ def test_system_prompt_keeps_memory_session_and_skill_guidance_together() -> Non
     assert "You have persistent memory across sessions." in prompt
     assert "use session_search to recall it" in prompt
     assert "After completing a complex task" in prompt
-    assert "Do NOT inspect MEMORY.md, USER.md, state.db, ~/.motis, or ~/.hermes" in prompt
+    assert "Do NOT inspect MEMORY.md, USER.md, state.db, or other files under ~/.motis" in prompt
 
 
 def test_runtime_skips_internal_source_tree_agents_md() -> None:
@@ -106,18 +106,31 @@ def test_memory_store_load_filters_existing_session_meta(monkeypatch, tmp_path: 
 def test_motis_memory_guidance_discourages_filesystem_recall() -> None:
     guidance = motis_prompt.MEMORY_AND_SESSION_GUIDANCE
 
-    assert "do not inspect MEMORY.md, USER.md, state.db, ~/.motis, or ~/.hermes" in guidance
+    assert "do not inspect MEMORY.md, USER.md, state.db, or other files under ~/.motis" in guidance
     assert 'If the user asks "do you remember me?"' in guidance
 
 
 def test_tool_schemas_discourage_filesystem_recall_for_memory_questions() -> None:
-    assert "Do NOT inspect MEMORY.md, USER.md, state.db, ~/.motis, or ~/.hermes" in SESSION_SEARCH_SCHEMA["description"]
+    assert "Do NOT inspect MEMORY.md, USER.md, state.db, or other files under ~/.motis" in SESSION_SEARCH_SCHEMA["description"]
     assert "Do NOT use this to inspect Motis memory storage" in SEARCH_FILES_SCHEMA["description"]
+    assert "state.db, ~/.motis" in SEARCH_FILES_SCHEMA["description"]
     assert "Do NOT use terminal to inspect Motis memory storage" in TERMINAL_SCHEMA["description"]
+    assert "state.db, ~/.motis" in TERMINAL_SCHEMA["description"]
 
 
-def test_get_hermes_home_defaults_to_motis(monkeypatch) -> None:
+def test_get_motis_home_defaults_to_motis(monkeypatch) -> None:
+    monkeypatch.delenv("MOTIS_HOME", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
     reloaded = importlib.reload(motis_constants)
 
+    assert reloaded.get_motis_home() == Path.home() / ".motis"
     assert reloaded.get_hermes_home() == Path.home() / ".motis"
+
+
+def test_get_motis_home_prefers_motis_env_over_compat_env(monkeypatch) -> None:
+    monkeypatch.setenv("MOTIS_HOME", "/tmp/motis-home")
+    monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-home")
+    reloaded = importlib.reload(motis_constants)
+
+    assert reloaded.get_motis_home() == Path("/tmp/motis-home")
+    assert reloaded.get_hermes_home() == Path("/tmp/motis-home")

@@ -8,15 +8,16 @@ import os
 import sys
 import subprocess
 import shutil
+from typing import Any
 
 from motis_cli.config import get_project_root, get_motis_home, get_env_path
-from motis_constants import display_motis_home
+from motis_constants import display_motis_home, get_motis_env, set_motis_env
 
 PROJECT_ROOT = get_project_root()
-HERMES_HOME = get_motis_home()
-_DHH = display_motis_home()  # user-facing display path (e.g. ~/.hermes or ~/.hermes/profiles/coder)
+MOTIS_HOME = get_motis_home()
+_DHH = display_motis_home()  # user-facing display path (e.g. ~/.motis or ~/.motis/profiles/coder)
 
-# Load environment variables from ~/.hermes/.env so API key checks work
+# Load environment variables from the active Motis home so API key checks work
 from dotenv import load_dotenv
 _env_path = get_env_path()
 if _env_path.exists():
@@ -64,7 +65,7 @@ def _system_package_install_cmd(pkg: str) -> str:
 
 
 def _has_provider_env_config(content: str) -> bool:
-    """Return True when ~/.hermes/.env contains provider auth/base URL settings."""
+    """Return True when the active Motis .env contains provider auth/base URL settings."""
     return any(key in content for key in _PROVIDER_ENV_HINTS)
 
 
@@ -93,6 +94,96 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
             continue
         updated_unavailable.append(item)
     return updated_available, updated_unavailable
+
+
+def _get_data_mcp_url_for_doctor() -> str:
+    explicit = os.getenv("DATA_MCP_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    return os.getenv("MCP_URL", "").strip().rstrip("/")
+
+
+def _doctor_fetch_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any] | None]:
+    import httpx
+
+    response = httpx.get(
+        url,
+        headers=headers,
+        timeout=3.0,
+        follow_redirects=True,
+        trust_env=False,
+    )
+    payload: dict[str, Any] | None = None
+    if response.content:
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = None
+    return response.status_code, payload
+
+
+def collect_data_mcp_status() -> dict[str, Any]:
+    base_url = _get_data_mcp_url_for_doctor()
+    secret = os.getenv("AGENT_MCP_SECRET", "").strip()
+    status: dict[str, Any] = {
+        "base_url": base_url or None,
+        "secret_configured": bool(secret),
+        "health_ok": False,
+        "auth_ok": None,
+        "tools_ok": False,
+        "tool_count": 0,
+        "routing": {},
+        "providers": {},
+        "errors": [],
+    }
+    if not base_url:
+        return status
+
+    try:
+        health_code, health_payload = _doctor_fetch_json(f"{base_url}/health")
+    except Exception as exc:
+        status["errors"].append(f"health unreachable: {exc}")
+        return status
+
+    if health_code != 200:
+        status["errors"].append(f"health returned HTTP {health_code}")
+        return status
+
+    status["health_ok"] = True
+    if isinstance(health_payload, dict):
+        routing = health_payload.get("routing")
+        if isinstance(routing, dict):
+            status["routing"] = routing
+        providers = health_payload.get("providers")
+        if isinstance(providers, dict):
+            status["providers"] = providers
+
+    if not secret:
+        return status
+
+    try:
+        tools_code, tools_payload = _doctor_fetch_json(
+            f"{base_url}/tools",
+            headers={"X-Agent-Token": secret},
+        )
+    except Exception as exc:
+        status["errors"].append(f"tools probe failed: {exc}")
+        return status
+
+    if tools_code == 200:
+        status["auth_ok"] = True
+        status["tools_ok"] = True
+        tools = []
+        if isinstance(tools_payload, dict) and isinstance(tools_payload.get("tools"), list):
+            tools = tools_payload["tools"]
+        status["tool_count"] = len(tools)
+        return status
+
+    status["auth_ok"] = False
+    status["errors"].append(f"tools returned HTTP {tools_code}")
+    return status
 
 
 def check_ok(text: str, detail: str = ""):
@@ -147,7 +238,8 @@ def run_doctor(args):
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `motis`.
-    os.environ.setdefault("HERMES_INTERACTIVE", "1")
+    if get_motis_env("INTERACTIVE") is None:
+        set_motis_env("INTERACTIVE", "1")
     
     issues = []
     manual_issues = []  # issues that can't be auto-fixed
@@ -224,8 +316,8 @@ def run_doctor(args):
     print()
     print(color("◆ Configuration Files", Colors.CYAN, Colors.BOLD))
     
-    # Check ~/.hermes/.env (primary location for user config)
-    env_path = HERMES_HOME / '.env'
+    # Check ~/.motis/.env (primary location for user config)
+    env_path = MOTIS_HOME / '.env'
     if env_path.exists():
         check_ok(f"{_DHH}/.env file exists")
         
@@ -253,8 +345,8 @@ def run_doctor(args):
                 check_info("Run 'motis setup' to create one")
                 issues.append("Run 'motis setup' to create .env")
     
-    # Check ~/.hermes/config.yaml (primary) or project cli-config.yaml (fallback)
-    config_path = HERMES_HOME / 'config.yaml'
+    # Check ~/.motis/config.yaml (primary) or project cli-config.yaml (fallback)
+    config_path = MOTIS_HOME / 'config.yaml'
     if config_path.exists():
         check_ok(f"{_DHH}/config.yaml exists")
     else:
@@ -275,7 +367,7 @@ def run_doctor(args):
                 check_warn("config.yaml not found", "(using defaults)")
 
     # Check config version and stale keys
-    config_path = HERMES_HOME / 'config.yaml'
+    config_path = MOTIS_HOME / 'config.yaml'
     if config_path.exists():
         try:
             from motis_cli.config import check_config_version, migrate_config
@@ -376,12 +468,12 @@ def run_doctor(args):
     print()
     print(color("◆ Directory Structure", Colors.CYAN, Colors.BOLD))
     
-    hermes_home = HERMES_HOME
-    if hermes_home.exists():
+    motis_home = MOTIS_HOME
+    if motis_home.exists():
         check_ok(f"{_DHH} directory exists")
     else:
         if should_fix:
-            hermes_home.mkdir(parents=True, exist_ok=True)
+            motis_home.mkdir(parents=True, exist_ok=True)
             check_ok(f"Created {_DHH} directory")
             fixed_count += 1
         else:
@@ -390,7 +482,7 @@ def run_doctor(args):
     # Check expected subdirectories
     expected_subdirs = ["cron", "sessions", "logs", "skills", "memories"]
     for subdir_name in expected_subdirs:
-        subdir_path = hermes_home / subdir_name
+        subdir_path = motis_home / subdir_name
         if subdir_path.exists():
             check_ok(f"{_DHH}/{subdir_name}/ exists")
         else:
@@ -402,7 +494,7 @@ def run_doctor(args):
                 check_warn(f"{_DHH}/{subdir_name}/ not found", "(will be created on first use)")
     
     # Check for SOUL.md persona file
-    soul_path = hermes_home / "SOUL.md"
+    soul_path = motis_home / "SOUL.md"
     if soul_path.exists():
         content = soul_path.read_text(encoding="utf-8").strip()
         # Check if it's just the template comments (no real content)
@@ -425,7 +517,7 @@ def run_doctor(args):
             fixed_count += 1
     
     # Check memory directory
-    memories_dir = hermes_home / "memories"
+    memories_dir = motis_home / "memories"
     if memories_dir.exists():
         check_ok(f"{_DHH}/memories/ directory exists")
         memory_file = memories_dir / "MEMORY.md"
@@ -448,7 +540,7 @@ def run_doctor(args):
             fixed_count += 1
     
     # Check SQLite session store
-    state_db_path = hermes_home / "state.db"
+    state_db_path = motis_home / "state.db"
     if state_db_path.exists():
         try:
             import sqlite3
@@ -463,7 +555,7 @@ def run_doctor(args):
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
 
     # Check WAL file size (unbounded growth indicates missed checkpoints)
-    wal_path = hermes_home / "state.db-wal"
+    wal_path = motis_home / "state.db-wal"
     if wal_path.exists():
         try:
             wal_size = wal_path.stat().st_size
@@ -714,6 +806,74 @@ def run_doctor(args):
                 print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_e})', Colors.DIM)}           ")
 
     # =========================================================================
+    # Check: MCP bridge
+    # =========================================================================
+    print()
+    print(color("◆ MCP Bridge", Colors.CYAN, Colors.BOLD))
+
+    data_mcp_status = collect_data_mcp_status()
+    data_mcp_url = data_mcp_status.get("base_url")
+    if data_mcp_url:
+        check_ok("Data MCP URL configured", f"({data_mcp_url})")
+    else:
+        check_warn("Data MCP URL not configured", "(set DATA_MCP_URL or MCP_URL to enable MCP-backed web/data tools)")
+        issues.append("Set DATA_MCP_URL or MCP_URL to a running Motis Data MCP service")
+
+    if data_mcp_status.get("secret_configured"):
+        check_ok("AGENT_MCP_SECRET configured")
+    else:
+        check_warn("AGENT_MCP_SECRET missing", "(tool auth to Data MCP may fail)")
+        issues.append("Set AGENT_MCP_SECRET in .env")
+
+    if data_mcp_url:
+        if data_mcp_status.get("health_ok"):
+            check_ok("Data MCP health endpoint")
+            routing = data_mcp_status.get("routing") or {}
+            search_provider = routing.get("search_provider")
+            if search_provider:
+                check_info(f"Search provider: {search_provider}")
+        else:
+            health_error = next(iter(data_mcp_status.get("errors") or []), "unreachable")
+            check_fail("Data MCP health endpoint", f"({health_error})")
+            check_info("Start it from services/mcp with: ./motis-mcp data-http")
+            issues.append("Start the Data MCP service or fix DATA_MCP_URL/MCP_URL")
+
+        if data_mcp_status.get("health_ok"):
+            if data_mcp_status.get("auth_ok") is True:
+                tool_count = data_mcp_status.get("tool_count", 0)
+                check_ok("Data MCP tool auth", f"({tool_count} tools visible)")
+            elif data_mcp_status.get("auth_ok") is False:
+                check_fail("Data MCP tool auth", "(AGENT_MCP_SECRET does not match the running MCP)")
+                issues.append("Match AGENT_MCP_SECRET between motis_agent and the Data MCP")
+            else:
+                check_warn("Data MCP tool auth not verified", "(AGENT_MCP_SECRET missing or tools probe skipped)")
+
+            providers = data_mcp_status.get("providers") or {}
+            market_diag = providers.get("market") or {}
+            research_diag = providers.get("research") or {}
+            market_providers = market_diag.get("providers") or {}
+            research_providers = research_diag.get("providers") or {}
+
+            yfinance_ready = bool((market_providers.get("yfinance") or {}).get("available"))
+            akshare_ready = bool((market_providers.get("akshare") or {}).get("available"))
+            if yfinance_ready or akshare_ready:
+                check_ok(
+                    "A-share structured fallbacks ready",
+                    f"(yfinance={str(yfinance_ready).lower()}, akshare={str(akshare_ready).lower()})",
+                )
+            else:
+                check_warn("A-share structured fallbacks unavailable", "(ticker/OHLCV/fundamentals may fail)")
+
+            tushare_ready = bool(
+                (market_providers.get("tushare") or {}).get("token_configured")
+                or (research_providers.get("tushare") or {}).get("token_configured")
+            )
+            if tushare_ready:
+                check_ok("TUSHARE_TOKEN configured")
+            else:
+                check_warn("TUSHARE_TOKEN not configured", "(flows.get_connect and china.get_moneyflow will not work)")
+
+    # =========================================================================
     # Check: Tool Availability
     # =========================================================================
     print()
@@ -752,7 +912,7 @@ def run_doctor(args):
     print()
     print(color("◆ Skills Hub", Colors.CYAN, Colors.BOLD))
 
-    hub_dir = HERMES_HOME / "skills" / ".hub"
+    hub_dir = MOTIS_HOME / "skills" / ".hub"
     if hub_dir.exists():
         check_ok("Skills Hub directory exists")
         lock_file = hub_dir / "lock.json"
@@ -787,7 +947,7 @@ def run_doctor(args):
     _active_memory_provider = ""
     try:
         import yaml as _yaml
-        _mem_cfg_path = HERMES_HOME / "config.yaml"
+        _mem_cfg_path = MOTIS_HOME / "config.yaml"
         if _mem_cfg_path.exists():
             with open(_mem_cfg_path) as _f:
                 _raw_cfg = _yaml.safe_load(_f) or {}

@@ -189,17 +189,20 @@ def run_uninstall(args):
     print(f"  Code:    {project_root}")
     print(f"  Config:  {hermes_home / 'config.yaml'}")
     print(f"  Secrets: {hermes_home / '.env'}")
-    print(f"  Data:    {hermes_home / 'cron/'}, {hermes_home / 'sessions/'}, {hermes_home / 'logs/'}")
+    print(
+        f"  Data:    {hermes_home / 'state.db'}, {hermes_home / 'cron/'}, "
+        f"{hermes_home / 'logs/'}, {hermes_home / 'sessions/'} (gateway routes)"
+    )
     print()
     
     # Ask for confirmation
     print(color("Uninstall Options:", Colors.YELLOW, Colors.BOLD))
     print()
-    print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep configs/sessions/logs")
+    print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep config/db/logs")
     print("     (Recommended - you can reinstall later with your settings intact)")
     print()
     print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
-    print("     (Warning: This deletes all configs, sessions, and logs permanently)")
+    print("     (Warning: This deletes all configs, DB data, routing state, and logs permanently)")
     print()
     print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
     print()
@@ -312,7 +315,7 @@ def run_uninstall(args):
         print(f"  {hermes_home}/")
         print()
         print("To reinstall later with your existing settings:")
-        print(color("  curl -fsSL https://raw.githubusercontent.com/DaddyElonMusk69/motis/main/services/upstream/hermes_agent/scripts/install.sh | bash", Colors.DIM))
+        print(color("  curl -fsSL https://raw.githubusercontent.com/DaddyElonMusk69/motis/main/services/motis_agent/scripts/install.sh | bash", Colors.DIM))
         print()
     
     print(color("Reload your shell to complete the process:", Colors.YELLOW))

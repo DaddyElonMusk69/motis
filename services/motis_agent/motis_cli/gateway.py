@@ -186,7 +186,7 @@ def kill_gateway_processes(force: bool = False, exclude_pids: set | None = None)
 
 
 def stop_profile_gateway() -> bool:
-    """Stop only the gateway for the current profile (HERMES_HOME-scoped).
+    """Stop only the gateway for the current profile (Motis-home scoped).
 
     Uses the PID file written by start_gateway(), so it only kills the
     gateway belonging to this profile — not gateways from other profiles.
@@ -244,21 +244,36 @@ _SERVICE_BASE = "motis-gateway"
 SERVICE_DESCRIPTION = "Motis Gateway - Messaging Platform Integration"
 
 
-def _profile_suffix() -> str:
-    """Derive a service-name suffix from the current HERMES_HOME.
+def _default_profile_root(home: Path, owner_home: Path | None = None) -> Path:
+    """Return the default root family that matches the active home path."""
+    base_home = (owner_home or Path.home()).resolve()
+    preferred = (base_home / ".motis").resolve()
+    legacy = (base_home / ".hermes").resolve()
+    if home == legacy:
+        return legacy
+    try:
+        home.relative_to(legacy)
+        return legacy
+    except ValueError:
+        return preferred
 
-    Returns ``""`` for the default ``~/.hermes``, the profile name for
-    ``~/.hermes/profiles/<name>``, or a short hash for any other custom
-    HERMES_HOME path.
+
+def _profile_suffix() -> str:
+    """Derive a service-name suffix from the current Motis home.
+
+    Returns ``""`` for the default root (typically ``~/.motis``), the profile
+    name for ``~/.motis/profiles/<name>``, or a short hash for any other
+    custom runtime home. Legacy ``~/.hermes`` roots are still recognized.
     """
     import hashlib
     import re
     from pathlib import Path as _Path
     home = get_motis_home().resolve()
-    default = (_Path.home() / ".hermes").resolve()
+    default = _default_profile_root(home, _Path.home())
     if home == default:
         return ""
-    # Detect ~/.hermes/profiles/<name> pattern → use the profile name
+    # Detect ~/.motis/profiles/<name> (or legacy ~/.hermes/profiles/<name>)
+    # and use the profile name directly.
     profiles_root = (default / "profiles").resolve()
     try:
         rel = home.relative_to(profiles_root)
@@ -267,25 +282,26 @@ def _profile_suffix() -> str:
             return parts[0]
     except ValueError:
         pass
-    # Fallback: short hash for arbitrary HERMES_HOME paths
+    # Fallback: short hash for arbitrary custom Motis homes.
     return hashlib.sha256(str(home).encode()).hexdigest()[:8]
 
 
-def _profile_arg(hermes_home: str | None = None) -> str:
-    """Return ``--profile <name>`` only when HERMES_HOME is a named profile.
+def _profile_arg(motis_home: str | None = None) -> str:
+    """Return ``--profile <name>`` only when the runtime home is a named profile.
 
-    For ``~/.hermes/profiles/<name>``, returns ``"--profile <name>"``.
+    For ``~/.motis/profiles/<name>`` (and legacy ``~/.hermes/profiles/<name>``),
+    returns ``"--profile <name>"``.
     For the default profile or hash-based custom paths, returns the empty string.
 
     Args:
-        hermes_home: Optional explicit HERMES_HOME path. Defaults to the current
+        motis_home: Optional explicit Motis home path. Defaults to the current
             ``get_motis_home()`` value. Should be passed when generating a
             service definition for a different user (e.g. system service).
     """
     import re
     from pathlib import Path as _Path
-    home = Path(hermes_home or str(get_motis_home())).resolve()
-    default = (_Path.home() / ".hermes").resolve()
+    home = Path(motis_home or str(get_motis_home())).resolve()
+    default = _default_profile_root(home, _Path.home())
     if home == default:
         return ""
     profiles_root = (default / "profiles").resolve()
@@ -300,11 +316,11 @@ def _profile_arg(hermes_home: str | None = None) -> str:
 
 
 def get_service_name() -> str:
-    """Derive a systemd service name scoped to this HERMES_HOME.
+    """Derive a systemd service name scoped to this Motis home.
 
-    Default ``~/.hermes`` returns ``motis-gateway`` (backward compatible).
-    Profile ``~/.hermes/profiles/coder`` returns ``motis-gateway-coder``.
-    Any other HERMES_HOME appends a short hash for uniqueness.
+    Default ``~/.motis`` returns ``motis-gateway`` (backward compatible).
+    Profile ``~/.motis/profiles/coder`` returns ``motis-gateway-coder``.
+    Any other Motis home appends a short hash for uniqueness.
     """
     suffix = _profile_suffix()
     if not suffix:
@@ -545,8 +561,8 @@ def print_systemd_linger_guidance() -> None:
 def get_launchd_plist_path() -> Path:
     """Return the launchd plist path, scoped per profile.
 
-    Default ``~/.hermes`` → ``ai.motis.gateway.plist``.
-    Profile ``~/.hermes/profiles/coder`` → ``ai.motis.gateway-coder.plist``.
+    Default ``~/.motis`` → ``ai.motis.gateway.plist``.
+    Profile ``~/.motis/profiles/coder`` → ``ai.motis.gateway-coder.plist``.
     """
     suffix = _profile_suffix()
     name = f"ai.motis.gateway-{suffix}" if suffix else "ai.motis.gateway"
@@ -612,30 +628,31 @@ def _build_user_local_paths(home: Path, path_entries: list[str]) -> list[str]:
     return [p for p in candidates if p not in path_entries and Path(p).exists()]
 
 
-def _hermes_home_for_target_user(target_home_dir: str) -> str:
-    """Remap the current HERMES_HOME to the equivalent under a target user's home.
+def _motis_home_for_target_user(target_home_dir: str) -> str:
+    """Remap the current Motis home to the equivalent under a target user's home.
 
     When installing a system service via sudo, get_motis_home() resolves to
     root's home.  This translates it to the target user's equivalent path:
-      /root/.hermes                    → /home/alice/.hermes
+      /root/.motis                     → /home/alice/.motis
+      /root/.motis/profiles/coder      → /home/alice/.motis/profiles/coder
       /root/.hermes/profiles/coder     → /home/alice/.hermes/profiles/coder
-      /opt/custom-hermes               → /opt/custom-hermes  (kept as-is)
+      /opt/custom-motis                → /opt/custom-motis  (kept as-is)
     """
-    current_hermes = get_motis_home().resolve()
-    current_default = (Path.home() / ".hermes").resolve()
-    target_default = Path(target_home_dir) / ".hermes"
+    current_motis = get_motis_home().resolve()
+    current_default = _default_profile_root(current_motis, Path.home())
+    target_default = Path(target_home_dir) / current_default.name
 
-    # Default ~/.hermes → remap to target user's default
-    if current_hermes == current_default:
+    # Default ~/.motis (or legacy ~/.hermes) → remap to target user's default.
+    if current_motis == current_default:
         return str(target_default)
 
-    # Profile or subdir of ~/.hermes → preserve the relative structure
+    # Profile or subdir of the default root → preserve the relative structure.
     try:
-        relative = current_hermes.relative_to(current_default)
+        relative = current_motis.relative_to(current_default)
         return str(target_default / relative)
     except ValueError:
-        # Completely custom path (not under ~/.hermes) — keep as-is
-        return str(current_hermes)
+        # Completely custom path (not under the default root) — keep as-is.
+        return str(current_motis)
 
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
@@ -657,8 +674,8 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
-        hermes_home = _hermes_home_for_target_user(home_dir)
-        profile_arg = _profile_arg(hermes_home)
+        motis_home = _motis_home_for_target_user(home_dir)
+        profile_arg = _profile_arg(motis_home)
         path_entries.extend(_build_user_local_paths(Path(home_dir), path_entries))
         path_entries.extend(common_bin_paths)
         sane_path = ":".join(path_entries)
@@ -680,7 +697,8 @@ Environment="USER={username}"
 Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
-Environment="HERMES_HOME={hermes_home}"
+Environment="MOTIS_HOME={motis_home}"
+Environment="HERMES_HOME={motis_home}"
 Restart=on-failure
 RestartSec=30
 KillMode=mixed
@@ -693,8 +711,8 @@ StandardError=journal
 WantedBy=multi-user.target
 """
 
-    hermes_home = str(get_motis_home().resolve())
-    profile_arg = _profile_arg(hermes_home)
+    motis_home = str(get_motis_home().resolve())
+    profile_arg = _profile_arg(motis_home)
     path_entries.extend(_build_user_local_paths(Path.home(), path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
@@ -710,7 +728,8 @@ ExecStart={python_path} -m motis_cli.main{f" {profile_arg}" if profile_arg else 
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
-Environment="HERMES_HOME={hermes_home}"
+Environment="MOTIS_HOME={motis_home}"
+Environment="HERMES_HOME={motis_home}"
 Restart=on-failure
 RestartSec=30
 KillMode=mixed
@@ -995,11 +1014,11 @@ def _launchd_domain() -> str:
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
-    hermes_home = str(get_motis_home().resolve())
+    motis_home = str(get_motis_home().resolve())
     log_dir = get_motis_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
-    profile_arg = _profile_arg(hermes_home)
+    profile_arg = _profile_arg(motis_home)
     # Build a sane PATH for the launchd plist.  launchd provides only a
     # minimal default (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
     # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
@@ -1058,8 +1077,10 @@ def generate_launchd_plist() -> str:
         <string>{sane_path}</string>
         <key>VIRTUAL_ENV</key>
         <string>{venv_dir}</string>
+        <key>MOTIS_HOME</key>
+        <string>{motis_home}</string>
         <key>HERMES_HOME</key>
-        <string>{hermes_home}</string>
+        <string>{motis_home}</string>
     </dict>
     
     <key>RunAtLoad</key>
@@ -1184,7 +1205,7 @@ def _wait_for_gateway_exit(timeout: float = 10.0, force_after: float = 5.0):
 
     Uses the PID from the gateway.pid file — not launchd labels — so this
     works correctly when multiple gateway instances run under separate
-    HERMES_HOME directories.
+    Motis home directories.
 
     Args:
         timeout: Total seconds to wait before giving up.

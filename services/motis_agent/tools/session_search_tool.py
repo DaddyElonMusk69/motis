@@ -458,7 +458,7 @@ SESSION_SEARCH_SCHEMA = {
         "- The user asks 'what did we do about X?' or 'how did we fix Y?'\n\n"
         "For questions like 'do you remember me?' or 'what do you remember about me?', "
         "consult injected memory first, then use session_search if you need cross-session recall. "
-        "Do NOT inspect MEMORY.md, USER.md, state.db, ~/.motis, or ~/.hermes unless the user is explicitly debugging storage internals.\n\n"
+        "Do NOT inspect MEMORY.md, USER.md, state.db, or other files under ~/.motis unless the user is explicitly debugging storage internals.\n\n"
         "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
         "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
         "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "

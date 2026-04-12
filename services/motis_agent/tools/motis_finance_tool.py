@@ -7,7 +7,6 @@ import inspect
 import json
 import logging
 import os
-import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -22,7 +21,8 @@ from tools.registry import registry, tool_error, tool_result
 logger = logging.getLogger(__name__)
 
 _DATA_MCP_TIMEOUT = 30.0
-_LOCAL_DATA_DISPATCH = None
+MOTIS_FINANCE_DATA_TOOLSET = "motis-finance-data"
+MOTIS_FINANCE_ANALYSIS_TOOLSET = "motis-finance"
 
 
 def _normalize_interval(interval: str) -> str:
@@ -79,37 +79,23 @@ def _build_data_mcp_headers(*, session_id: str | None = None) -> dict[str, str]:
     return headers
 
 
-def _decode_data_mcp_payload(result: Any) -> dict[str, Any]:
-    if isinstance(result, dict):
-        return result
-
-    if isinstance(result, list):
-        for item in result:
-            text = getattr(item, "text", None)
-            if not text:
-                continue
-            payload = json.loads(text)
-            if isinstance(payload, dict):
-                return payload
-
-    raise ValueError("Motis Data MCP returned an unsupported payload shape")
+def _require_data_mcp_url() -> str:
+    base_url = _get_data_mcp_url()
+    if base_url:
+        return base_url
+    raise ValueError(
+        "Motis structured finance data requires DATA_MCP_URL (preferred) or "
+        "MCP_URL to point to a running motis-data-mcp-http service."
+    )
 
 
-def _resolve_local_data_dispatch():
-    global _LOCAL_DATA_DISPATCH
-    if _LOCAL_DATA_DISPATCH is not None:
-        return _LOCAL_DATA_DISPATCH
+def check_motis_data_mcp() -> bool:
+    """Return True when the Motis Data MCP transport is configured."""
+    return bool(_get_data_mcp_url())
 
-    try:
-        from motis_data_mcp.tools import dispatch_data as local_dispatch_data
-    except ModuleNotFoundError:
-        service_root = Path(__file__).resolve().parents[2] / "mcp"
-        if str(service_root) not in sys.path:
-            sys.path.insert(0, str(service_root))
-        from motis_data_mcp.tools import dispatch_data as local_dispatch_data
 
-    _LOCAL_DATA_DISPATCH = local_dispatch_data
-    return _LOCAL_DATA_DISPATCH
+def _motis_data_mcp_requires_env() -> list[str]:
+    return ["DATA_MCP_URL", "AGENT_MCP_SECRET"]
 
 
 async def _call_data_mcp_async(
@@ -118,23 +104,19 @@ async def _call_data_mcp_async(
     *,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    base_url = _get_data_mcp_url()
-    if base_url:
-        async with httpx.AsyncClient(
-            timeout=_DATA_MCP_TIMEOUT,
-            follow_redirects=True,
-            trust_env=False,
-        ) as client:
-            response = await client.post(
-                f"{base_url}/tools/{tool_name}",
-                json=payload,
-                headers=_build_data_mcp_headers(session_id=session_id),
-            )
-            response.raise_for_status()
-            return response.json()
-
-    dispatch_data = _resolve_local_data_dispatch()
-    return _decode_data_mcp_payload(await dispatch_data(tool_name, payload))
+    base_url = _require_data_mcp_url()
+    async with httpx.AsyncClient(
+        timeout=_DATA_MCP_TIMEOUT,
+        follow_redirects=True,
+        trust_env=False,
+    ) as client:
+        response = await client.post(
+            f"{base_url}/tools/{tool_name}",
+            json=payload,
+            headers=_build_data_mcp_headers(session_id=session_id),
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _extract_data_mcp_data(response: dict[str, Any], *, tool_name: str) -> dict[str, Any]:
@@ -1317,18 +1299,22 @@ PATTERN_RECOGNITION_SCHEMA = {
 
 registry.register(
     name="data.resolve_symbol",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_RESOLVE_SYMBOL_SCHEMA,
     handler=data_resolve_symbol_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🧩",
 )
 
 registry.register(
     name="data.ohlcv",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_OHLCV_SCHEMA,
     handler=data_ohlcv_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="📈",
     max_result_size_chars=100_000,
@@ -1336,18 +1322,22 @@ registry.register(
 
 registry.register(
     name="data.ticker",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_TICKER_SCHEMA,
     handler=data_ticker_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="💹",
 )
 
 registry.register(
     name="data.orderbook",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_ORDERBOOK_SCHEMA,
     handler=data_orderbook_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="📚",
     max_result_size_chars=100_000,
@@ -1355,9 +1345,11 @@ registry.register(
 
 registry.register(
     name="data.funding_rate",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_FUNDING_RATE_SCHEMA,
     handler=data_funding_rate_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🪙",
     max_result_size_chars=100_000,
@@ -1365,9 +1357,11 @@ registry.register(
 
 registry.register(
     name="data.open_interest",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=DATA_OPEN_INTEREST_SCHEMA,
     handler=data_open_interest_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🏦",
     max_result_size_chars=100_000,
@@ -1375,9 +1369,11 @@ registry.register(
 
 registry.register(
     name="macro.get_series",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=MACRO_GET_SERIES_SCHEMA,
     handler=macro_get_series_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🌐",
     max_result_size_chars=100_000,
@@ -1385,9 +1381,11 @@ registry.register(
 
 registry.register(
     name="equity.get_fundamentals",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=EQUITY_GET_FUNDAMENTALS_SCHEMA,
     handler=equity_get_fundamentals_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🏛",
     max_result_size_chars=100_000,
@@ -1395,9 +1393,11 @@ registry.register(
 
 registry.register(
     name="equity.get_earnings_calendar",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=EQUITY_GET_EARNINGS_CALENDAR_SCHEMA,
     handler=equity_get_earnings_calendar_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🗓",
     max_result_size_chars=100_000,
@@ -1405,9 +1405,11 @@ registry.register(
 
 registry.register(
     name="flows.get_connect",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=FLOWS_GET_CONNECT_SCHEMA,
     handler=flows_get_connect_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🔁",
     max_result_size_chars=100_000,
@@ -1415,9 +1417,11 @@ registry.register(
 
 registry.register(
     name="china.get_moneyflow",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_DATA_TOOLSET,
     schema=CHINA_GET_MONEYFLOW_SCHEMA,
     handler=china_get_moneyflow_tool,
+    check_fn=check_motis_data_mcp,
+    requires_env=_motis_data_mcp_requires_env(),
     is_async=True,
     emoji="🏮",
     max_result_size_chars=100_000,
@@ -1425,7 +1429,7 @@ registry.register(
 
 registry.register(
     name="smc.structure",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_ANALYSIS_TOOLSET,
     schema=SMC_STRUCTURE_SCHEMA,
     handler=smc_structure_tool,
     is_async=True,
@@ -1435,7 +1439,7 @@ registry.register(
 
 registry.register(
     name="factor_analysis",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_ANALYSIS_TOOLSET,
     schema=FACTOR_ANALYSIS_SCHEMA,
     handler=factor_analysis_tool,
     emoji="📊",
@@ -1444,7 +1448,7 @@ registry.register(
 
 registry.register(
     name="options_pricing",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_ANALYSIS_TOOLSET,
     schema=OPTIONS_PRICING_SCHEMA,
     handler=options_pricing_tool,
     emoji="🧮",
@@ -1452,7 +1456,7 @@ registry.register(
 
 registry.register(
     name="pattern_recognition",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_ANALYSIS_TOOLSET,
     schema=PATTERN_RECOGNITION_SCHEMA,
     handler=pattern_tool,
     is_async=True,
@@ -1462,7 +1466,7 @@ registry.register(
 
 registry.register(
     name="pattern",
-    toolset="motis-finance",
+    toolset=MOTIS_FINANCE_ANALYSIS_TOOLSET,
     schema={**PATTERN_RECOGNITION_SCHEMA, "name": "pattern", "description": "Compatibility alias for pattern_recognition."},
     handler=pattern_tool,
     is_async=True,

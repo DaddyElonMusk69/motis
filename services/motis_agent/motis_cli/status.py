@@ -339,18 +339,37 @@ def show_status(args):
     # =========================================================================
     print()
     print(color("◆ Sessions", Colors.CYAN, Colors.BOLD))
-    
+
+    state_db_path = get_motis_home() / "state.db"
+    if state_db_path.exists():
+        db = None
+        try:
+            from motis_state import SessionDB
+
+            db = SessionDB(db_path=state_db_path, readonly=True)
+            print(f"  Conversations:{db.session_count()}")
+            print(f"  Messages:     {db.message_count()}")
+        except Exception:
+            print("  Conversations:(error reading state.db)")
+            print("  Messages:     (error reading state.db)")
+        finally:
+            if db is not None:
+                db.close()
+    else:
+        print("  Conversations:0")
+        print("  Messages:     0")
+
     sessions_file = get_motis_home() / "sessions" / "sessions.json"
     if sessions_file.exists():
         import json
         try:
             with open(sessions_file, encoding="utf-8") as f:
                 data = json.load(f)
-                print(f"  Active:       {len(data)} session(s)")
+                print(f"  Gateway map:  {len(data)} active route(s)")
         except Exception:
-            print("  Active:       (error reading sessions file)")
+            print("  Gateway map:  (error reading sessions file)")
     else:
-        print("  Active:       0")
+        print("  Gateway map:  0")
     
     # =========================================================================
     # Deep checks

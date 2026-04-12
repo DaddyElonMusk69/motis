@@ -24,14 +24,20 @@ def load_motis_dotenv(
     """Load Motis environment files with user config taking precedence.
 
     Behavior:
-    - `~/.hermes/.env` overrides stale shell-exported values when present.
+    - `~/.motis/.env` overrides stale shell-exported values when present.
     - project `.env` acts as a dev fallback and only fills missing values when
       the user env exists.
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
     loaded: list[Path] = []
 
-    home_path = Path(motis_home or hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+    home_path = Path(
+        motis_home
+        or hermes_home
+        or os.getenv("MOTIS_HOME")
+        or os.getenv("HERMES_HOME")
+        or (Path.home() / ".motis")
+    )
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
 

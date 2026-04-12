@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-MOTIS_CLI = REPO_ROOT / "services/upstream/hermes_agent/motis"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+MOTIS_CLI = REPO_ROOT / "services/motis_agent/motis"
 
 
 def _run_motis(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -45,7 +45,7 @@ def test_motis_chat_help_smoke() -> None:
 
 def test_motis_chat_unconfigured_first_run_guidance(tmp_path: Path) -> None:
     motis_home = tmp_path / "motis-home"
-    result = _run_motis("chat", "-q", "hello", env={"HERMES_HOME": str(motis_home)})
+    result = _run_motis("chat", "-q", "hello", env={"MOTIS_HOME": str(motis_home)})
     combined_output = f"{result.stdout}\n{result.stderr}"
 
     assert result.returncode != 0
@@ -55,18 +55,18 @@ def test_motis_chat_unconfigured_first_run_guidance(tmp_path: Path) -> None:
 
 def test_motis_doctor_smoke(tmp_path: Path) -> None:
     motis_home = tmp_path / "motis-home"
-    result = _run_motis("doctor", env={"HERMES_HOME": str(motis_home)})
+    result = _run_motis("doctor", env={"MOTIS_HOME": str(motis_home)})
 
     assert result.returncode == 0, result.stderr
     assert "Motis Doctor" in result.stdout
     assert "Configuration Files" in result.stdout
-    assert ".env file missing" in result.stdout
+    assert "config.yaml not found" in result.stdout
 
 
 def test_cli_module_import_does_not_require_fire(monkeypatch) -> None:
-    upstream_root = REPO_ROOT / "services/upstream/hermes_agent"
-    if str(upstream_root) not in sys.path:
-        sys.path.insert(0, str(upstream_root))
+    motis_root = REPO_ROOT / "services/motis_agent"
+    if str(motis_root) not in sys.path:
+        sys.path.insert(0, str(motis_root))
 
     original_import = builtins.__import__
 

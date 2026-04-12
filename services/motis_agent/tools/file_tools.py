@@ -778,7 +778,7 @@ PATCH_SCHEMA = {
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.\n\nDo NOT use this to inspect Motis memory storage (MEMORY.md, USER.md, state.db, ~/.motis, ~/.hermes) when answering recall questions; built-in memory is injected and session_search handles cross-session recall.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.\n\nDo NOT use this to inspect Motis memory storage (MEMORY.md, USER.md, state.db, ~/.motis) when answering recall questions; built-in memory is injected and session_search handles cross-session recall.",
     "parameters": {
         "type": "object",
         "properties": {

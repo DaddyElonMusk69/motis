@@ -19,7 +19,11 @@ def test_health_reports_http_transport():
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["transport"] == "http"
+    payload = response.json()
+    assert payload["transport"] == "http"
+    assert payload["routing"]["search_provider"]
+    assert "market" in payload["providers"]
+    assert "research" in payload["providers"]
 
 
 def test_call_tool_rejects_missing_agent_token():

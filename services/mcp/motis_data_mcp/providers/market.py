@@ -7,6 +7,7 @@ import importlib.util
 import math
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -55,6 +56,36 @@ class ResolvedInstrument:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+
+
+@contextmanager
+def without_proxy_env():
+    """Temporarily clear proxy env vars for provider SDKs that honor trust_env."""
+    previous = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
+    try:
+        for name in _PROXY_ENV_VARS:
+            os.environ.pop(name, None)
+        os.environ["NO_PROXY"] = "*"
+        os.environ["no_proxy"] = "*"
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _iso(value: Any) -> str:
@@ -193,6 +224,18 @@ def resolve_instrument(symbol: str, exchange: str | None = None) -> ResolvedInst
         )
 
     if _A_SHARE_RE.match(upper):
+        digits, exchange_code = upper.split(".", 1)
+        yfinance_suffix = {
+            "SH": "SS",
+            "SZ": "SZ",
+            "BJ": "BJ",
+        }.get(exchange_code)
+        provider_symbols = {
+            "tushare": upper,
+            "akshare": upper,
+        }
+        if yfinance_suffix:
+            provider_symbols["yfinance"] = f"{digits}.{yfinance_suffix}"
         return ResolvedInstrument(
             input_symbol=raw,
             normalized_symbol=upper,
@@ -201,10 +244,7 @@ def resolve_instrument(symbol: str, exchange: str | None = None) -> ResolvedInst
             exchange=exchange_value or upper.rsplit(".", 1)[-1].lower(),
             base_asset=None,
             quote_asset=None,
-            provider_symbols={
-                "tushare": upper,
-                "akshare": upper,
-            },
+            provider_symbols=provider_symbols,
         )
 
     if _HK_RE.match(upper):
@@ -361,14 +401,14 @@ def _records_from_frame(frame: Any) -> list[dict[str, Any]]:
 
 class YFinanceMarketProvider:
     name = "yfinance"
-    markets = {"us_equity", "hk_equity"}
+    markets = {"a_share", "us_equity", "hk_equity"}
 
     def is_available(self) -> bool:
         return importlib.util.find_spec("yfinance") is not None
 
     async def get_ohlcv(self, resolved: ResolvedInstrument, *, interval: str, limit: int) -> dict[str, Any]:
         if resolved.market not in self.markets:
-            raise MarketDataNotSupported("yfinance only supports US and HK equities")
+            raise MarketDataNotSupported("yfinance only supports equity-style markets in this runtime")
         return await asyncio.to_thread(self._get_ohlcv_sync, resolved, interval, limit)
 
     def _get_ohlcv_sync(self, resolved: ResolvedInstrument, interval: str, limit: int) -> dict[str, Any]:
@@ -397,8 +437,9 @@ class YFinanceMarketProvider:
             "1w": "max",
             "1mo": "max",
         }
-        ticker = yf.Ticker(_provider_symbol(resolved.provider_symbols, self.name))
-        frame = ticker.history(period=period_map[interval], interval=interval_map[interval], auto_adjust=False)
+        with without_proxy_env():
+            ticker = yf.Ticker(_provider_symbol(resolved.provider_symbols, self.name))
+            frame = ticker.history(period=period_map[interval], interval=interval_map[interval], auto_adjust=False)
         if frame is None or frame.empty:
             raise ValueError(f"yfinance returned no OHLCV data for {resolved.normalized_symbol}")
         if interval == "4h":
@@ -418,15 +459,17 @@ class YFinanceMarketProvider:
 
     async def get_ticker(self, resolved: ResolvedInstrument) -> dict[str, Any]:
         if resolved.market not in self.markets:
-            raise MarketDataNotSupported("yfinance only supports US and HK equities")
+            raise MarketDataNotSupported("yfinance only supports equity-style markets in this runtime")
         return await asyncio.to_thread(self._get_ticker_sync, resolved)
 
     def _get_ticker_sync(self, resolved: ResolvedInstrument) -> dict[str, Any]:
         import yfinance as yf
 
-        ticker = yf.Ticker(_provider_symbol(resolved.provider_symbols, self.name))
-        last_timestamp = None
-        history = ticker.history(period="5d", interval="1d", auto_adjust=False)
+        with without_proxy_env():
+            ticker = yf.Ticker(_provider_symbol(resolved.provider_symbols, self.name))
+            last_timestamp = None
+            history = ticker.history(period="5d", interval="1d", auto_adjust=False)
+            fast_info = getattr(ticker, "fast_info", None) or {}
         if history is not None and not history.empty:
             latest = history.iloc[-1]
             last_timestamp = history.index[-1]
@@ -440,7 +483,6 @@ class YFinanceMarketProvider:
         else:
             fallback = {"last": None, "open": None, "high": None, "low": None, "volume": None}
 
-        fast_info = getattr(ticker, "fast_info", None) or {}
         return {
             "symbol": resolved.input_symbol,
             "normalized_symbol": resolved.normalized_symbol,
@@ -489,41 +531,42 @@ class AkshareMarketProvider:
         start_date, end_date = _lookback_dates(limit, interval)
         period = {"1d": "daily", "1w": "weekly", "1mo": "monthly"}[interval]
 
-        if resolved.market == "a_share":
-            symbol = resolved.normalized_symbol.split(".", 1)[0]
-            frame = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period=period,
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-                adjust="qfq",
-            )
-        elif resolved.market == "us_equity":
-            symbol = resolved.normalized_symbol[:-3]
-            frame = None
-            for prefix in ("105.", "106.", ""):
-                try:
-                    candidate = ak.stock_us_hist(
-                        symbol=f"{prefix}{symbol}",
-                        period="daily",
-                        start_date=start_date.replace("-", ""),
-                        end_date=end_date.replace("-", ""),
-                        adjust="qfq",
-                    )
-                except Exception:
-                    continue
-                if candidate is not None and not candidate.empty:
-                    frame = candidate
-                    break
-        else:
-            symbol = resolved.normalized_symbol.replace(".HK", "")
-            frame = ak.stock_hk_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-                adjust="qfq",
-            )
+        with without_proxy_env():
+            if resolved.market == "a_share":
+                symbol = resolved.normalized_symbol.split(".", 1)[0]
+                frame = ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period=period,
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="qfq",
+                )
+            elif resolved.market == "us_equity":
+                symbol = resolved.normalized_symbol[:-3]
+                frame = None
+                for prefix in ("105.", "106.", ""):
+                    try:
+                        candidate = ak.stock_us_hist(
+                            symbol=f"{prefix}{symbol}",
+                            period="daily",
+                            start_date=start_date.replace("-", ""),
+                            end_date=end_date.replace("-", ""),
+                            adjust="qfq",
+                        )
+                    except Exception:
+                        continue
+                    if candidate is not None and not candidate.empty:
+                        frame = candidate
+                        break
+            else:
+                symbol = resolved.normalized_symbol.replace(".HK", "")
+                frame = ak.stock_hk_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="qfq",
+                )
 
         if frame is None or frame.empty:
             raise ValueError(f"akshare returned no OHLCV data for {resolved.normalized_symbol}")
@@ -595,36 +638,37 @@ class TushareMarketProvider:
     def _get_ohlcv_sync(self, resolved: ResolvedInstrument, interval: str, limit: int) -> dict[str, Any]:
         import pandas as pd
 
-        api = self._get_client()
-        start_date, end_date = _lookback_dates(limit, interval)
+        with without_proxy_env():
+            api = self._get_client()
+            start_date, end_date = _lookback_dates(limit, interval)
 
-        if interval == "1d":
-            frame = api.daily(
-                ts_code=resolved.normalized_symbol,
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-            )
-            if frame is None or frame.empty:
-                raise ValueError(f"tushare returned no OHLCV data for {resolved.normalized_symbol}")
-            frame = frame.sort_values("trade_date")
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-            frame = frame.rename(columns={"vol": "volume"}).set_index("trade_date")
-        else:
-            freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "60min"}
-            freq = freq_map.get(interval)
-            if not freq:
-                raise MarketDataNotSupported("tushare intraday support is limited to 1m/5m/15m/30m/1h")
-            frame = api.stk_mins(
-                ts_code=resolved.normalized_symbol,
-                freq=freq,
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-            )
-            if frame is None or frame.empty:
-                raise ValueError(f"tushare returned no intraday data for {resolved.normalized_symbol}")
-            frame = frame.sort_values("trade_time")
-            frame["trade_time"] = pd.to_datetime(frame["trade_time"])
-            frame = frame.rename(columns={"trade_time": "timestamp", "vol": "volume"}).set_index("timestamp")
+            if interval == "1d":
+                frame = api.daily(
+                    ts_code=resolved.normalized_symbol,
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                )
+                if frame is None or frame.empty:
+                    raise ValueError(f"tushare returned no OHLCV data for {resolved.normalized_symbol}")
+                frame = frame.sort_values("trade_date")
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+                frame = frame.rename(columns={"vol": "volume"}).set_index("trade_date")
+            else:
+                freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "60min"}
+                freq = freq_map.get(interval)
+                if not freq:
+                    raise MarketDataNotSupported("tushare intraday support is limited to 1m/5m/15m/30m/1h")
+                frame = api.stk_mins(
+                    ts_code=resolved.normalized_symbol,
+                    freq=freq,
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                )
+                if frame is None or frame.empty:
+                    raise ValueError(f"tushare returned no intraday data for {resolved.normalized_symbol}")
+                frame = frame.sort_values("trade_time")
+                frame["trade_time"] = pd.to_datetime(frame["trade_time"])
+                frame = frame.rename(columns={"trade_time": "timestamp", "vol": "volume"}).set_index("timestamp")
 
         records = _records_from_frame(frame.tail(limit))
         return {
@@ -960,11 +1004,76 @@ _MARKET_PROVIDER_FACTORIES = {
 }
 
 _MARKET_FALLBACK_CHAINS = {
-    "a_share": ["tushare", "akshare"],
+    "a_share": ["tushare", "yfinance", "akshare"],
     "us_equity": ["yfinance", "akshare"],
     "hk_equity": ["yfinance", "akshare"],
     "crypto": ["okx", "ccxt"],
 }
+
+
+def get_market_provider_diagnostics() -> dict[str, Any]:
+    """Summarize market-provider readiness for health checks and debugging."""
+    module_map = {
+        "tushare": "tushare",
+        "akshare": "akshare",
+        "yfinance": "yfinance",
+        "ccxt": "ccxt",
+    }
+    providers: dict[str, dict[str, Any]] = {}
+
+    for provider_name, factory in _MARKET_PROVIDER_FACTORIES.items():
+        provider = factory()
+        module_name = module_map.get(provider_name)
+        module_available = (
+            importlib.util.find_spec(module_name) is not None
+            if module_name is not None
+            else None
+        )
+        token_configured = (
+            bool(os.getenv("TUSHARE_TOKEN", "").strip())
+            if provider_name == "tushare"
+            else None
+        )
+
+        reason: str | None = None
+        try:
+            available = bool(provider.is_available())
+        except Exception as exc:
+            available = False
+            reason = str(exc)
+
+        if not available and reason is None:
+            if provider_name == "tushare":
+                if not module_available and not token_configured:
+                    reason = "package missing and TUSHARE_TOKEN not configured"
+                elif not module_available:
+                    reason = "package missing"
+                elif not token_configured:
+                    reason = "TUSHARE_TOKEN not configured"
+                else:
+                    reason = "provider reported unavailable"
+            elif module_name is not None and not module_available:
+                reason = "package missing"
+            else:
+                reason = "provider reported unavailable"
+
+        entry: dict[str, Any] = {
+            "available": available,
+            "markets": sorted(getattr(provider, "markets", set())),
+        }
+        if module_name is not None:
+            entry["module"] = module_name
+            entry["module_available"] = module_available
+        if token_configured is not None:
+            entry["token_configured"] = token_configured
+        if reason:
+            entry["reason"] = reason
+        providers[provider_name] = entry
+
+    return {
+        "fallback_chains": _MARKET_FALLBACK_CHAINS,
+        "providers": providers,
+    }
 
 
 class MarketDataRouter:

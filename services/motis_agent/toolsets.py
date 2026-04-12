@@ -108,16 +108,23 @@ TOOLSETS = {
         "includes": []
     },
 
-    "motis-finance": {
-        "description": "Motis finance runtime tools: structured market data, SMC structure, factor analysis, options pricing, and pattern recognition.",
+    "motis-finance-data": {
+        "description": "Motis finance data tools routed through the Motis Data MCP: market data, macro series, fundamentals, earnings, and China flow data.",
         "tools": [
             "data.resolve_symbol", "data.ohlcv", "data.ticker", "data.orderbook",
             "data.funding_rate", "data.open_interest",
             "macro.get_series", "equity.get_fundamentals", "equity.get_earnings_calendar",
             "flows.get_connect", "china.get_moneyflow",
-            "smc.structure", "factor_analysis", "options_pricing", "pattern", "pattern_recognition",
         ],
         "includes": []
+    },
+
+    "motis-finance": {
+        "description": "Motis finance runtime tools: structured data via MCP plus local quantitative analysis tools.",
+        "tools": [
+            "smc.structure", "factor_analysis", "options_pricing", "pattern", "pattern_recognition",
+        ],
+        "includes": ["motis-finance-data"]
     },
 
     "motis-operators": {

@@ -1,6 +1,8 @@
 # Motis Agent - Development Guide
 
-Instructions for AI coding assistants and developers working on the hermes-agent codebase.
+Instructions for AI coding assistants and developers working on the Motis codebase.
+This repo originated from Hermes, but Motis is the current product and runtime identity.
+Do not describe the live agent as Hermes in user-facing responses.
 
 ## Development Environment
 
@@ -11,7 +13,7 @@ source venv/bin/activate  # ALWAYS activate before running Python
 ## Project Structure
 
 ```
-hermes-agent/
+motis-agent/
 ├── run_agent.py          # AIAgent class — core conversation loop
 ├── model_tools.py        # Tool orchestration, _discover_tools(), handle_function_call()
 ├── toolsets.py           # Toolset definitions, _HERMES_CORE_TOOLS list
@@ -60,7 +62,7 @@ hermes-agent/
 └── devtools/             # Development helpers (batch runner, trajectory tools)
 ```
 
-**User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys)
+**User config:** `~/.motis/config.yaml` (settings), `~/.motis/.env` (API keys)
 
 ## File Dependency Chain
 

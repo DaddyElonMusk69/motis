@@ -73,14 +73,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------------------------
 # Profile override — MUST happen before any motis module import.
 #
-# Many modules cache HERMES_HOME at import time (module-level constants).
-# We intercept --profile/-p from sys.argv here and set the env var so that
-# every subsequent ``os.getenv("HERMES_HOME", ...)`` resolves correctly.
+# Many modules cache the home directory at import time (module-level constants).
+# We intercept --profile/-p from sys.argv here and set the env vars so that
+# every subsequent ``os.getenv("MOTIS_HOME", ...)`` / ``os.getenv("HERMES_HOME", ...)``
+# resolves correctly.
 # The flag is stripped from sys.argv so argparse never sees it.
-# Falls back to ~/.hermes/active_profile for sticky default.
+# Falls back to the sticky active-profile file when present.
 # ---------------------------------------------------------------------------
 def _apply_profile_override() -> None:
-    """Pre-parse --profile/-p and set HERMES_HOME before module imports."""
+    """Pre-parse --profile/-p and set Motis home env vars before module imports."""
     argv = sys.argv[1:]
     profile_name = None
     consume = 0
@@ -96,23 +97,29 @@ def _apply_profile_override() -> None:
             consume = 1
             break
 
-    # 2. If no flag, check ~/.hermes/active_profile
+    # 2. If no flag, check sticky active-profile files.
     if profile_name is None:
         try:
-            active_path = Path.home() / ".hermes" / "active_profile"
-            if active_path.exists():
+            active_paths = [
+                Path.home() / ".motis" / "active_profile",
+                Path.home() / ".hermes" / "active_profile",
+            ]
+            for active_path in active_paths:
+                if not active_path.exists():
+                    continue
                 name = active_path.read_text().strip()
                 if name and name != "default":
                     profile_name = name
                     consume = 0  # don't strip anything from argv
+                    break
         except (UnicodeDecodeError, OSError):
             pass  # corrupted file, skip
 
-    # 3. If we found a profile, resolve and set HERMES_HOME
+    # 3. If we found a profile, resolve and set home env vars.
     if profile_name is not None:
         try:
             from motis_cli.profiles import resolve_profile_env
-            hermes_home = resolve_profile_env(profile_name)
+            motis_home = resolve_profile_env(profile_name)
         except (ValueError, FileNotFoundError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -120,7 +127,8 @@ def _apply_profile_override() -> None:
             # A bug in profiles.py must NEVER prevent motis from starting
             print(f"Warning: profile override failed ({exc}), using default", file=sys.stderr)
             return
-        os.environ["HERMES_HOME"] = hermes_home
+        os.environ["MOTIS_HOME"] = motis_home
+        os.environ["HERMES_HOME"] = motis_home
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0:
             for i, arg in enumerate(argv):
@@ -135,7 +143,7 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
+# Load .env from the active Motis home first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from motis_cli.config import get_motis_home
 from motis_cli.env_loader import load_motis_dotenv
@@ -154,15 +162,15 @@ import time as _time
 from datetime import datetime
 
 from motis_cli import __version__, __release_date__
-from motis_constants import OPENROUTER_BASE_URL
+from motis_constants import OPENROUTER_BASE_URL, get_motis_env, set_motis_env
 
 logger = logging.getLogger(__name__)
 
 OFFICIAL_REPO_SLUG = "DaddyElonMusk69/motis"
-OFFICIAL_REPO_SUBDIR = Path("services") / "upstream" / "hermes_agent"
+OFFICIAL_REPO_SUBDIR = Path("services") / "motis_agent"
 OFFICIAL_INSTALL_SCRIPT_URL = (
     f"https://raw.githubusercontent.com/{OFFICIAL_REPO_SLUG}/main/"
-    "services/upstream/hermes_agent/scripts/install.sh"
+    "services/motis_agent/scripts/install.sh"
 )
 
 
@@ -546,7 +554,7 @@ def _resolve_last_cli_session() -> Optional[str]:
     """Look up the most recent CLI session ID from SQLite. Returns None if unavailable."""
     try:
         from motis_state import SessionDB
-        db = SessionDB()
+        db = SessionDB(readonly=True)
         sessions = db.search_sessions(source="cli", limit=1)
         db.close()
         if sessions:
@@ -565,7 +573,7 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
     """
     try:
         from motis_state import SessionDB
-        db = SessionDB()
+        db = SessionDB(readonly=True)
 
         # Try as exact session ID first
         session = db.get_session(name_or_id)
@@ -657,11 +665,11 @@ def cmd_chat(args):
 
     # --yolo: bypass all dangerous command approvals
     if getattr(args, "yolo", False):
-        os.environ["HERMES_YOLO_MODE"] = "1"
+        set_motis_env("YOLO_MODE", "1")
 
     # --source: tag session source for filtering (e.g. 'tool' for third-party integrations)
     if getattr(args, "source", None):
-        os.environ["HERMES_SESSION_SOURCE"] = args.source
+        set_motis_env("SESSION_SOURCE", args.source)
 
     # Import and run the CLI
     from cli import main as cli_main
@@ -927,7 +935,7 @@ def select_provider_and_model(args=None):
 
     effective_provider = (
         config_provider
-        or os.getenv("HERMES_INFERENCE_PROVIDER")
+        or get_motis_env("INFERENCE_PROVIDER")
         or "auto"
     )
     try:
@@ -3075,15 +3083,13 @@ def _invalidate_update_cache():
     ``motis update``, every profile is now current.
     """
     homes = []
-    # Default profile home
-    default_home = Path.home() / ".hermes"
-    homes.append(default_home)
-    # Named profiles under ~/.hermes/profiles/
-    profiles_root = default_home / "profiles"
-    if profiles_root.is_dir():
-        for entry in profiles_root.iterdir():
-            if entry.is_dir():
-                homes.append(entry)
+    for default_home in (Path.home() / ".motis", Path.home() / ".hermes"):
+        homes.append(default_home)
+        profiles_root = default_home / "profiles"
+        if profiles_root.is_dir():
+            for entry in profiles_root.iterdir():
+                if entry.is_dir():
+                    homes.append(entry)
     for home in homes:
         try:
             cache_file = home / ".update_check"
@@ -3742,7 +3748,7 @@ def cmd_profile(args):
         try:
             set_active_profile(name)
             if name == "default":
-                print(f"Switched to: default (~/.hermes)")
+                print(f"Switched to: default (~/.motis)")
             else:
                 print(f"Switched to: {name}")
         except (ValueError, FileNotFoundError) as e:
@@ -3814,7 +3820,7 @@ def cmd_profile(args):
             print(f"  {name} chat               Start chatting")
             print(f"  {name} gateway start      Start the messaging gateway")
             if clone or clone_all:
-                profile_dir_display = f"~/.hermes/profiles/{name}"
+                profile_dir_display = f"~/.motis/profiles/{name}"
                 print(f"\n  Edit {profile_dir_display}/.env for different API keys")
                 print(f"  Edit {profile_dir_display}/SOUL.md for different personality")
             print()
@@ -4927,14 +4933,14 @@ For more help on a command:
 
     def cmd_sessions(args):
         import json as _json
+        action = args.sessions_action
+        readonly_actions = {"list", "browse", "stats", "export"}
         try:
             from motis_state import SessionDB
-            db = SessionDB()
+            db = SessionDB(readonly=action in readonly_actions)
         except Exception as e:
             print(f"Error: Could not open session database: {e}")
             return
-
-        action = args.sessions_action
 
         # Hide third-party tool sessions by default, but honour explicit --source
         _source = getattr(args, "source", None)
@@ -5097,7 +5103,7 @@ For more help on a command:
             from motis_state import SessionDB
             from agent.insights import InsightsEngine
 
-            db = SessionDB()
+            db = SessionDB(readonly=True)
             engine = InsightsEngine(db)
             report = engine.generate(days=args.days, source=args.source)
             print(engine.format_terminal(report))

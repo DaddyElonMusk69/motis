@@ -31,6 +31,7 @@ def test_resolve_instrument_covers_core_motis_markets():
 
     assert a_share.market == "a_share"
     assert a_share.provider_symbols["tushare"] == "000001.SZ"
+    assert a_share.provider_symbols["yfinance"] == "000001.SZ"
 
     assert crypto_spot.market == "crypto"
     assert crypto_spot.normalized_symbol == "BTC-USDT"

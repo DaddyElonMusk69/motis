@@ -941,7 +941,7 @@ PLANNED_DATA_TOOLS: list[Tool] = [
 
 DATA_PROVIDER_ROUTING_PLAN: dict[str, object] = {
     "structured_market_routing": {
-        "a_share": ["tushare", "akshare"],
+        "a_share": ["tushare", "yfinance", "akshare"],
         "us_equity": ["yfinance", "akshare"],
         "hk_equity": ["yfinance", "akshare"],
         "crypto": ["okx", "ccxt"],

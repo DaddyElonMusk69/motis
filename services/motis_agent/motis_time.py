@@ -4,8 +4,9 @@ Provides a single ``now()`` helper that returns a timezone-aware datetime
 based on the user's configured IANA timezone (e.g. ``Asia/Kolkata``).
 
 Resolution order:
-  1. ``HERMES_TIMEZONE`` environment variable
-  2. ``timezone`` key in ``~/.hermes/config.yaml``
+  1. ``MOTIS_TIMEZONE`` environment variable
+  2. ``HERMES_TIMEZONE`` compatibility environment variable
+  3. ``timezone`` key in ``~/.motis/config.yaml``
   3. Falls back to the server's local time (``datetime.now().astimezone()``)
 
 Invalid timezone values log a warning and fall back safely — Motis never
@@ -17,7 +18,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from motis_constants import get_hermes_home
+from motis_constants import get_motis_home
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +34,15 @@ _cache_resolved: bool = False
 
 def _resolve_timezone_name() -> str:
     """Read the configured IANA timezone string (or empty string)."""
-    tz_env = os.getenv("HERMES_TIMEZONE", "").strip()
+    tz_env = os.getenv("MOTIS_TIMEZONE", "").strip() or os.getenv("HERMES_TIMEZONE", "").strip()
     if tz_env:
         return tz_env
 
     try:
         import yaml
 
-        hermes_home = get_hermes_home()
-        config_path = hermes_home / "config.yaml"
+        motis_home = get_motis_home()
+        config_path = motis_home / "config.yaml"
         if config_path.exists():
             with open(config_path) as f:
                 cfg = yaml.safe_load(f) or {}

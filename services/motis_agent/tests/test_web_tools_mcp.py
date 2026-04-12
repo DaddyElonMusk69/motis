@@ -4,7 +4,8 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 
 UPSTREAM_ROOT = Path(__file__).resolve().parents[1]
@@ -110,11 +111,11 @@ def test_web_extract_tool_routes_through_data_mcp(monkeypatch) -> None:
     assert payload["results"][0]["content"] == "hello world"
 
 
-def test_check_web_api_key_accepts_local_mcp_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(web_tools, "_get_data_mcp_url", lambda: "")
-    monkeypatch.setattr(web_tools, "_resolve_local_data_dispatch", lambda: object())
+def test_check_web_api_key_requires_configured_data_mcp_url(monkeypatch) -> None:
+    monkeypatch.delenv("DATA_MCP_URL", raising=False)
+    monkeypatch.delenv("MCP_URL", raising=False)
 
-    assert web_tools.check_web_api_key() is True
+    assert web_tools.check_web_api_key() is False
 
 
 def test_data_mcp_url_falls_back_to_mcp_url(monkeypatch) -> None:
@@ -148,6 +149,13 @@ def test_sync_data_mcp_http_call_disables_trust_env(monkeypatch) -> None:
     assert payload == {"status": "ok"}
     assert captured["url"] == "http://localhost:8002/tools/web_search"
     assert captured["trust_env"] is False
+
+
+def test_sync_data_mcp_http_call_requires_configured_url(monkeypatch) -> None:
+    monkeypatch.setattr(web_tools, "_get_data_mcp_url", lambda: "")
+
+    with pytest.raises(ValueError, match="DATA_MCP_URL"):
+        web_tools._call_data_mcp_sync("web_search", {"query": "fed dot plot"})
 
 
 def test_async_data_mcp_http_call_disables_trust_env(monkeypatch) -> None:
@@ -188,3 +196,64 @@ def test_async_data_mcp_http_call_disables_trust_env(monkeypatch) -> None:
         "follow_redirects": True,
         "trust_env": False,
     }
+
+
+def test_web_crawl_tool_routes_through_data_mcp(monkeypatch) -> None:
+    calls = []
+
+    async def fake_call(tool_name: str, payload: dict, *, session_id: str | None = None) -> dict:
+        calls.append((tool_name, payload, session_id))
+        return {
+            "status": "ok",
+            "service": "motis_data_mcp",
+            "tool": "web_crawl",
+            "provider": "motis_crawler",
+            "warnings": [],
+            "error": None,
+            "data": {
+                "root_url": payload["root_url"],
+                "mode": payload["mode"],
+                "pages": [
+                    {
+                        "url": "https://example.com/docs",
+                        "final_url": "https://example.com/docs",
+                        "title": "Example Docs",
+                        "content": "hello world",
+                        "metadata": {},
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(web_tools, "_call_data_mcp_async", fake_call)
+    monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
+    monkeypatch.setattr(web_tools, "check_website_access", lambda url: None)
+    monkeypatch.setattr(web_tools._debug, "log_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_tools._debug, "save", lambda *args, **kwargs: None)
+
+    raw = asyncio.run(
+        web_tools.web_crawl_tool(
+            "example.com",
+            "Find docs",
+            depth="advanced",
+            use_llm_processing=False,
+        )
+    )
+    payload = json.loads(raw)
+
+    assert calls == [
+        (
+            "web_crawl",
+            {
+                "root_url": "https://example.com",
+                "prompt": "Find docs",
+                "mode": "extract",
+                "max_pages": 20,
+                "same_domain_only": True,
+            },
+            None,
+        )
+    ]
+    assert payload["success"] is True
+    assert payload["results"][0]["title"] == "Example Docs"
+    assert payload["results"][0]["content"] == "hello world"
