@@ -2,7 +2,101 @@
 
 ## The Operator Contract
 
-Every operator is a folder containing an `operator.py` entry point that exports exactly three things:
+Every operator is a folder containing two required files:
+
+1. **`OPERATOR.md`** — Short, human+LLM-readable description (for discovery)
+2. **`operator.py`** — The executable contract (STATE, MANIFEST, build_graph)
+
+### OPERATOR.md — The Discovery File
+
+Every operator folder **MUST** include an `OPERATOR.md` file. This is the operator's
+equivalent of a skill's `SKILL.md` — a brief, scannable summary that allows the
+master agent (and humans) to understand what the operator does **without reading
+the full `operator.py`**.
+
+The registry reads `OPERATOR.md` files at scan time to build the operator index
+shown in the agent's system prompt.
+
+**Required format:**
+
+```markdown
+# Operator Name
+
+> One-line summary of what this operator does.
+
+**Type:** paper_trade | live_trade | backtest | research
+**Asset Class:** crypto_perp | us_equity | cn_a_share | multi_asset
+**Exchange:** hyperliquid | binance | okx | (blank for research)
+**Trigger:** cron `*/15 * * * *` | webhook | manual
+
+## What It Does
+
+2-4 sentences describing the strategy logic, methodology, or research workflow.
+Mention the key indicators, frameworks, or techniques used.
+
+## Agents (if multi-agent)
+
+- **agent_name** — Role description (1 line)
+- **agent_name** — Role description (1 line)
+
+## Graph Shape
+
+```
+DATA → COMPUTE → REASON → GUARD → EXECUTE
+```
+
+## When To Use
+
+1-2 sentences describing when the master agent should recommend or invoke
+this operator. What kind of user request triggers it?
+
+## Variables
+
+- `variable_name` — Description (e.g., target asset, timeframe, risk level)
+```
+
+**Rules:**
+- The `# Operator Name` heading MUST match `MANIFEST["name"]`
+- The `> One-line summary` is what appears in the system prompt index
+- Keep total length under 30 lines — this is a card, not a manual
+- Agents section only needed for multi-agent operators
+- Variables section lists any user-configurable parameters
+
+**Example (`btc_smc_long/OPERATOR.md`):**
+
+```markdown
+# BTC SMC Long
+
+> Buys BTC after a bullish BOS confirmed by a liquidity sweep. 2% risk per trade.
+
+**Type:** live_trade
+**Asset Class:** crypto_perp
+**Exchange:** hyperliquid
+**Trigger:** cron `*/15 * * * *`
+
+## What It Does
+
+Uses Smart Money Concepts (ICT) to detect bullish structure breaks (BOS)
+following a liquidity sweep. Entry at or near a bullish order block with
+hard stop-loss below the sweep low. Position sized at 2% risk per trade.
+
+## Graph Shape
+
+```
+DATA → COMPUTE(smc) → REASON(entry) → COMPUTE(sizing) → GUARD → EXECUTE
+```
+
+## When To Use
+
+User wants an automated BTC long strategy using SMC/ICT methodology on
+the 4H timeframe with strict risk management.
+```
+
+---
+
+### operator.py — The Executable Contract
+
+`operator.py` exports exactly three things:
 
 ```python
 STATE: type              # TypedDict defining the state schema
@@ -34,7 +128,7 @@ MANIFEST = {
         "funding_analyst": {
             "role": "Funding Rate & Basis Analyst",
             "system_prompt": "You are a senior derivatives analyst...",
-            "tools": ["bash", "read_file", "load_skill"],
+            "tools": ["read_file", "load_skill", "web_search", "read_url"],
             "skills": ["perp-funding-basis", "okx-market"],
             "max_iterations": 50,
             "model_name": None,  # None = use user's default model
@@ -42,7 +136,7 @@ MANIFEST = {
         "risk_manager": {
             "role": "Desk Risk Manager",
             "system_prompt": "You are the head risk manager...",
-            "tools": ["bash", "read_file", "write_file", "load_skill"],
+            "tools": ["read_file", "write_file", "load_skill"],
             "skills": ["risk-analysis", "asset-allocation"],
         },
     },
@@ -56,6 +150,9 @@ MANIFEST = {
 
 When a REASON node references an `"agent"` key, it spawns a **new, scoped agent instance**
 (not the master agent). That agent runs a full ReAct loop with the specified tools and skills.
+In platform mode, those scoped agents do **not** bypass the Motis boundary: any external
+network or market-data access must use logical tools/skills that route through Data MCP,
+and any order action must stay in EXECUTE paths that route through Execution MCP.
 
 ---
 
@@ -78,6 +175,8 @@ during decomposition:
 - **Agent-loop** — `run_agent(agent_id, context)` for multi-step work (fetch data, analyze,
   write report). References an agent declared in `MANIFEST["agents"]`. Each spawned agent
   gets its own scoped tool/skill whitelist and runs independently of the master agent.
+  On-platform, that whitelist should expose logical MCP-backed tools (`web_search`, `read_url`,
+  `call_skill("data.*")`, `call_skill("research.*")`) rather than raw provider/network clients.
 
 ### The critical difference from v1
 

@@ -1,29 +1,42 @@
-# Motis — Dev Makefile
+# Motis — Repo-Root Dev Makefile
 # Usage: make <target>
 # Requires: docker compose, python 3.11+, uv
 
 .PHONY: up down db-migrate db-reset db-shell db-logs \
-        agent platform test lint type-check help
+        bootstrap up-storage down-clean db-migrate-test db-rollback \
+        db-new-migration db-status agent chat ask smoke-agent build-motis \
+        test lint format format-check type-check ci-check help
+
+VENV_BIN := .venv/bin
+VENV_PYTHON := $(VENV_BIN)/python
+VENV_PYTEST := $(VENV_BIN)/pytest
+VENV_RUFF := $(VENV_BIN)/ruff
+VENV_MYPY := $(VENV_BIN)/mypy
+MOTIS_SOURCE_DIR := services/motis_agent
+MOTIS_BUILD_DIR := dist/motis-agent
+
+bootstrap:
+	./scripts/bootstrap-python.sh
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
 up:
-	@echo "Starting Motis dev infrastructure (Postgres + Redis)..."
+	@echo "Starting Motis development infrastructure (Postgres + Redis)..."
 	docker compose up -d
 	@echo "✓ Postgres on localhost:5432  (user: motis / pass: motis)"
 	@echo "✓ Redis    on localhost:6379"
 	@echo ""
-	@echo "Next: make db-migrate   (run migrations)"
+	@echo "Next: make db-migrate"
 
 up-storage:
-	@echo "Starting full stack including MinIO..."
+	@echo "Starting development infrastructure plus MinIO..."
 	docker compose --profile storage up -d
 
 down:
 	docker compose down
 
 down-clean:
-	@echo "⚠️  This will delete all DB data and Redis cache."
+	@echo "This will delete all database and Redis state."
 	docker compose down -v
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -45,9 +58,9 @@ db-rollback:
 		uv run alembic -c ../../alembic.ini downgrade -1
 
 db-reset:
-	@echo "⚠️  Dropping and recreating Motis DB..."
-	docker exec -it motis_postgres psql -U motis -c "DROP DATABASE IF EXISTS motis;"
-	docker exec -it motis_postgres psql -U motis -c "CREATE DATABASE motis OWNER motis;"
+	@echo "Dropping and recreating the Motis development database..."
+	docker exec motis_postgres psql -U motis -c "DROP DATABASE IF EXISTS motis;"
+	docker exec motis_postgres psql -U motis -c "CREATE DATABASE motis OWNER motis;"
 	$(MAKE) db-migrate
 	@echo "✓ DB reset complete"
 
@@ -69,61 +82,58 @@ db-status:
 # ── Services ──────────────────────────────────────────────────────────────────
 
 agent:
-	@echo "Starting agent service with hot-reload..."
-	cd services/agent && uv run uvicorn motis_agent.server:app \
-		--host 0.0.0.0 --port 8001 --reload --log-level info
+	@[ -x "$(VENV_PYTHON)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	@echo "Starting the Motis agent service..."
+	PYTHONPATH=services $(VENV_PYTHON) -m motis_agent.server --reload
 
 chat:
-	@echo "Starting Motis CLI (no platform required)..."
-	@[ "$$MOTIS_API_KEY" ] || [ "$$OPENAI_API_KEY" ] || \
-		(echo "Error: set MOTIS_API_KEY or OPENAI_API_KEY first" && exit 1)
-	cd services/agent && uv run python -m motis_agent.cli
+	@[ -x "$(VENV_PYTHON)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	@echo "Starting the Motis CLI..."
+	PYTHONPATH=services $(VENV_PYTHON) -m motis_agent.cli
 
 ask:
 	@[ "$(Q)" ] || (echo "Usage: make ask Q='your question here'" && exit 1)
-	@[ "$$MOTIS_API_KEY" ] || [ "$$OPENAI_API_KEY" ] || \
-		(echo "Error: set MOTIS_API_KEY or OPENAI_API_KEY first" && exit 1)
-	cd services/agent && uv run python -m motis_agent.cli --one-shot "$(Q)"
+	@[ -x "$(VENV_PYTHON)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	PYTHONPATH=services $(VENV_PYTHON) -m motis_agent.cli --one-shot "$(Q)"
 
-platform:
-	@echo "Starting platform service with hot-reload..."
-	cd services/platform && uv run uvicorn motis_platform.api.app:app \
-		--host 0.0.0.0 --port 8000 --reload --log-level info
+smoke-agent:
+	@[ "$(MESSAGE)" ] || (echo "Usage: make smoke-agent MESSAGE='hello'" && exit 1)
+	./scripts/smoke-agent-chat.sh --message "$(MESSAGE)" $(SMOKE_ARGS)
 
-worker:
-	@echo "Starting Celery operator runtime worker..."
-	cd services/platform && uv run celery -A motis_platform.operator_runtime.worker worker \
-		--loglevel=info --concurrency=4 -Q operators
+build-motis:
+	@command -v python3 >/dev/null 2>&1 || (echo "python3 is required to build Motis." && exit 1)
+	@mkdir -p "$(MOTIS_BUILD_DIR)"
+	python3 -m pip wheel "$(MOTIS_SOURCE_DIR)" --no-deps --no-build-isolation -w "$(MOTIS_BUILD_DIR)"
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 
 test:
-	@echo "Running test suite..."
-	DATABASE_URL=postgresql+asyncpg://motis:motis@localhost:5432/motis_test \
-	uv run pytest tests/ -v --tb=short
-
-test-agent:
-	DATABASE_URL=postgresql+asyncpg://motis:motis@localhost:5432/motis_test \
-	uv run pytest tests/agent/ -v --tb=short
-
-test-platform:
-	DATABASE_URL=postgresql+asyncpg://motis:motis@localhost:5432/motis_test \
-	uv run pytest tests/platform/ -v --tb=short
-
-test-fast:
-	uv run pytest tests/ -v --tb=short -m "not integration"
+	@echo "Running checked-in Motis tests..."
+	@[ -x "$(VENV_PYTEST)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	$(VENV_PYTEST) -c pyproject.toml --tb=short -q
 
 # ── Code Quality ──────────────────────────────────────────────────────────────
 
 lint:
-	uv run ruff check . --fix
-	uv run ruff format .
+	@[ -x "$(VENV_RUFF)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	$(VENV_RUFF) check .
+
+format:
+	@[ -x "$(VENV_RUFF)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	$(VENV_RUFF) format .
+
+format-check:
+	@[ -x "$(VENV_RUFF)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	$(VENV_RUFF) format --check .
 
 type-check:
-	uv run mypy services/ packages/ --ignore-missing-imports
+	@[ -x "$(VENV_MYPY)" ] || (echo "Run 'make bootstrap' first." && exit 1)
+	$(VENV_MYPY) packages/shared/motis_shared
+	$(VENV_MYPY) services/motis_agent/operators
 
 ci-check:
 	$(MAKE) lint
+	$(MAKE) format-check
 	$(MAKE) type-check
 	$(MAKE) test
 
@@ -133,6 +143,9 @@ help:
 	@echo ""
 	@echo "Motis Dev Commands"
 	@echo "=================="
+	@echo ""
+	@echo "Workspace:"
+	@echo "  make bootstrap       Install or refresh the Python workspace"
 	@echo ""
 	@echo "Infrastructure:"
 	@echo "  make up              Start Postgres + Redis"
@@ -149,18 +162,19 @@ help:
 	@echo "  make db-new-migration NAME=my_name   Auto-generate a new migration"
 	@echo ""
 	@echo "Services:"
-	@echo "  make agent           Run agent service (hot-reload)"
-	@echo "  make chat            Run Motis CLI REPL (no platform needed)"
-	@echo "  make ask Q='...'     One-shot agent query (no platform needed)"
-	@echo "  make platform        Run platform service (hot-reload)"
-	@echo "  make worker          Run Celery operator worker"
+	@echo "  make agent           Run the Motis agent service"
+	@echo "  make chat            Run the Motis CLI"
+	@echo "  make ask Q='...'     One-shot Motis query"
+	@echo "  make smoke-agent MESSAGE='...'   Send a smoke-test message over HTTP"
+	@echo "  make build-motis     Build the Motis wheel into dist/motis-agent"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test            Run all tests"
-	@echo "  make test-fast       Run unit tests only (no integration)"
+	@echo "  make test            Run the checked-in test suite"
 	@echo ""
 	@echo "Code Quality:"
-	@echo "  make lint            Run ruff lint + format"
-	@echo "  make type-check      Run mypy"
-	@echo "  make ci-check        lint + type-check + test (mirrors CI)"
+	@echo "  make lint            Run ruff lint checks"
+	@echo "  make format          Format Python files with ruff"
+	@echo "  make format-check    Check formatting without modifying files"
+	@echo "  make type-check      Run the repo-root mypy targets"
+	@echo "  make ci-check        lint + format-check + type-check + test"
 	@echo ""

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+venv/
 .uv/
 .uv-cache/
 *.egg-info/
@@ -34,11 +35,17 @@ Thumbs.db
 # Logs
 *.log
 logs/
+.coverage
 
-# Data / secrets
+# Local data / secrets
 *.pem
 *.key
-services/agent/upstream/vibe_trading/.git
+.*smoke*/
+.motis-*/
+.tmp-test-operators/
+services/upstream/openclaw/node_modules/
+services/upstream/vibe_trading/.git
+services/motis_agent/.motis*/
 
 # Runtime-generated operators (created by the agent)
-services/agent/motis_agent/operators/user/
+services/motis_agent/operators/user/

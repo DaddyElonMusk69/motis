@@ -23,7 +23,7 @@ jobs:
         run: pip install uv
 
       - name: Install workspace
-        run: uv sync
+        run: uv sync --locked
 
       - name: Ruff (lint + format check)
         run: uv run ruff check . && uv run ruff format --check .
@@ -31,7 +31,7 @@ jobs:
       - name: Mypy (type check shared packages)
         run: |
           uv run mypy packages/shared/motis_shared
-          uv run mypy packages/operator_sdk/motis_operator
+          uv run mypy services/motis_agent/operators
 
   # ── Python tests ────────────────────────────────────────────────────────────
   python-test:
@@ -66,7 +66,7 @@ jobs:
         run: pip install uv
 
       - name: Install workspace
-        run: uv sync
+        run: uv sync --locked
 
       - name: Enable Postgres extensions + create test DB
         env:

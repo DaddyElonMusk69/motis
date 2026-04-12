@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_SCRIPT="$SCRIPT_DIR/setup-mcp.sh"
+BOOTSTRAP_SENTINEL="MOTIS_MCP_AUTO_BOOTSTRAPPED"
+
+pick_python() {
+  local candidate=""
+  local candidates=(
+    "$SCRIPT_DIR/venv/bin/python"
+    "$SCRIPT_DIR/.venv/bin/python"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [ ! -x "$candidate" ]; then
+      continue
+    fi
+    if "$candidate" -c "import motis_data_mcp.server, motis_execution_mcp.server, motis_operator_mcp.server" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+bootstrap_local_env() {
+  if [ "${!BOOTSTRAP_SENTINEL:-0}" = "1" ]; then
+    return 1
+  fi
+
+  if [ ! -x "$SETUP_SCRIPT" ]; then
+    return 1
+  fi
+
+  printf 'Bootstrapping local Motis MCP environment...\n' >&2
+  export "$BOOTSTRAP_SENTINEL"=1
+  "$SETUP_SCRIPT" >/dev/stderr
+}
+
+print_help() {
+  cat <<'EOF'
+Usage: ./motis-mcp <command>
+
+Commands:
+  data            Run the Data MCP stdio server
+  data-http       Run the Data MCP HTTP server
+  execution       Run the Execution MCP stdio server
+  execution-http  Run the Execution MCP HTTP server
+  operator        Run the Operator MCP stdio server
+  operator-http   Run the Operator MCP HTTP server
+  help            Show this help
+EOF
+}
+
+command_name="${1:-help}"
+case "$command_name" in
+  data)
+    module_name="motis_data_mcp.server"
+    ;;
+  data-http)
+    module_name="motis_data_mcp.http_server"
+    ;;
+  execution)
+    module_name="motis_execution_mcp.server"
+    ;;
+  execution-http)
+    module_name="motis_execution_mcp.http_server"
+    ;;
+  operator)
+    module_name="motis_operator_mcp.server"
+    ;;
+  operator-http)
+    module_name="motis_operator_mcp.http_server"
+    ;;
+  help|-h|--help|"")
+    print_help
+    exit 0
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    print_help >&2
+    exit 1
+    ;;
+esac
+shift || true
+
+PYTHON_BIN="$(pick_python || true)"
+if [ -z "${PYTHON_BIN:-}" ]; then
+  bootstrap_local_env || true
+  PYTHON_BIN="$(pick_python || true)"
+fi
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+  printf 'Motis MCP dependencies are not installed. Run %s and retry.\n' "$SETUP_SCRIPT" >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" -m "$module_name" "$@"

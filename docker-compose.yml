@@ -1,8 +1,7 @@
-version: "3.9"
-
-# ─── Motis Local Development Stack ───────────────────────────────────────────
-# Starts infrastructure only (Postgres + Redis).
-# Python services are run separately with uvicorn / celery worker for hot-reload.
+# ─── Motis Repo-Root Compose ─────────────────────────────────────────────────
+# Infrastructure only: Postgres, Redis, and optional MinIO.
+# Run application services from the workspace directly. Containerized app
+# services live under infra/docker-compose.yml when that workflow is needed.
 #
 # Usage:
 #   docker compose up -d                # start infra

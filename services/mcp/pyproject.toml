@@ -1,7 +1,7 @@
 [project]
 name = "motis-mcp"
 version = "0.1.0"
-description = "Motis MCP Server — trading execution and market data tools"
+description = "Motis MCP workspace — data, execution, and operator MCP services"
 requires-python = ">=3.11"
 dependencies = [
     "motis-shared",
@@ -9,7 +9,13 @@ dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
+    "ddgs>=6.0",
+    "lxml>=5.2",
+    "pandas>=2.2",
     "pydantic-settings>=2.2",
+    "yfinance>=0.2",
+    "akshare>=1.14",
+    "tushare>=1.4",
     # Exchange connectivity
     "ccxt>=4.3",
     "hyperliquid-python-sdk>=0.9",
@@ -19,8 +25,20 @@ dependencies = [
 ]
 
 [project.scripts]
-motis-mcp = "motis_mcp.server:main"
+motis-data-mcp = "motis_data_mcp.server:main"
+motis-data-mcp-http = "motis_data_mcp.http_server:main"
+motis-execution-mcp = "motis_execution_mcp.server:main"
+motis-execution-mcp-http = "motis_execution_mcp.http_server:main"
+motis-operator-mcp = "motis_operator_mcp.server:main"
+motis-operator-mcp-http = "motis_operator_mcp.http_server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "motis_data_mcp",
+    "motis_execution_mcp",
+    "motis_operator_mcp",
+]

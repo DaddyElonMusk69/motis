@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UPSTREAM_REPO="${HERMES_UPSTREAM_REPO:-https://github.com/NousResearch/hermes-agent.git}"
 UPSTREAM_REF="${HERMES_UPSTREAM_REF:-b87d00288d68b7e63df86eb0f11134e8f1304ec9}"
-DEST="${ROOT}/services/agent/upstream/hermes_agent"
+DEST="${ROOT}/services/upstream/hermes_agent"
 
 if [[ -e "${DEST}" ]]; then
   echo "Destination already exists: ${DEST}" >&2
@@ -39,7 +39,7 @@ rsync -a \
   --exclude 'RELEASE_*.md' \
   "${WORKDIR}/src/" "${DEST}/"
 
-printf '%s\n' "${UPSTREAM_REF}" > "${ROOT}/services/agent/upstream/HERMES_UPSTREAM_COMMIT"
+printf '%s\n' "${UPSTREAM_REF}" > "${ROOT}/services/upstream/HERMES_UPSTREAM_COMMIT"
 
 echo "Imported Hermes upstream snapshot at ${UPSTREAM_REF}"
 echo "Destination: ${DEST}"

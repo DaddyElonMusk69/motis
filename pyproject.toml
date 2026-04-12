@@ -1,11 +1,13 @@
 [tool.uv.workspace]
 members = [
     "packages/shared",
-    "packages/operator_sdk",
-    "services/agent",
+    "services/motis_agent",
     "services/mcp",
     "services/platform",
 ]
+
+[tool.uv.sources]
+motis-shared = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
@@ -15,3 +17,16 @@ dev-dependencies = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["services/motis_agent/tests"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    ".uv-cache",
+    "node_modules",
+    "services/upstream",
+    "services/upstream/openclaw",
+    "services/upstream/claude-code-source-code",
+]
+asyncio_mode = "auto"

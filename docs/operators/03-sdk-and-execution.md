@@ -21,7 +21,7 @@ from motis_operator.sdk import call_skill, reason_call, run_agent, submit_order,
 | `call_skill("smc.structure", {...})` | Pure compute (no I/O) | **In-process** — no MCP round-trip | In-process (same) |
 | `call_skill("signals.smc", {...})` | Signal generation (backtest-ready) | **In-process** | In-process (same) |
 | `reason_call(prompt, ...)` | Single LLM call for REASON nodes | Platform model config / BYOM | Local API key |
-| `run_agent(agent_id, context)` | Spawn scoped sub-agent loop | New agent instance with scoped tools/skills | Same (local) |
+| `run_agent(agent_id, context)` | Spawn scoped sub-agent loop | New agent instance with scoped tools/skills; external I/O still routes via MCP-backed logical tools | Same (local) |
 | `run_backtest(data_map, signal_fn, ...)` | Bar-by-bar strategy backtest | In-process (async) | In-process (same) |
 | `submit_order(symbol, side, ...)` | Place exchange order | **MCP** → `execute_live_trade` tool | Direct exchange SDK |
 | `cancel_order(order_id)` | Cancel order | **MCP** → `cancel_order` tool | Direct exchange SDK |
@@ -35,6 +35,14 @@ I/O skills (data.*, research.*)  → MCP on platform, direct calls standalone
 Pure compute (smc.*, technical.*) → always in-process (no reason to round-trip)
 Execution (submit_order, etc.)    → always MCP on platform, direct SDK standalone
 Agent loops (run_agent)           → new scoped agent instance (same in all modes)
+```
+
+Sub-agents spawned with `run_agent()` follow the same routing rule:
+
+```
+Sub-agent web/data access         → Data MCP on platform, direct adapters standalone
+Sub-agent execution/order actions → Execution MCP on platform, direct SDK standalone
+Pure compute inside sub-agents    → always in-process
 ```
 
 ### `run_agent()` — spawning scoped sub-agents
@@ -58,6 +66,7 @@ async def run_agent(
     - Only the skills listed in its config (scoped whitelist)
     - The user's model config (or per-agent override if model_name is set)
     - Its own iteration limit (from config, default 25)
+    - The same MCP routing policy as the parent operator when running on-platform
 
     It does NOT get:
     - The master agent's conversation history
@@ -107,6 +116,20 @@ async def call_skill(name, args):
 ```
 
 The operator code never changes between modes — only the SDK backend swaps.
+
+### Sub-agent networking policy
+
+When a REASON node spawns a sub-agent with `run_agent()`, the sub-agent is still an
+operator-owned worker, not a new infrastructure tier.
+
+- On-platform, sub-agents should use logical tools like `web_search`, `read_url`,
+  and `call_skill("data.*")` / `call_skill("research.*")`, which route through MCP.
+- On-platform, sub-agents should **not** use raw `requests`, `httpx`, `ccxt`,
+  `yfinance`, or `bash` + `curl` as a networking shortcut.
+- Live order placement should remain in explicit EXECUTE nodes or tightly scoped
+  execution helpers that route through Execution MCP.
+- Standalone mode can swap the backend to direct adapters, but the operator code
+  and sub-agent design should still target the same logical interface.
 
 ---
 

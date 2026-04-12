@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+Motis Agent CLI launcher.
+
+This wrapper should behave like the installed `motis` command, including
+subcommands such as `gateway`, `cron`, and `doctor`.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_BOOTSTRAP_SENTINEL = "MOTIS_AUTO_BOOTSTRAPPED"
+
+
+def _local_python_paths(script_path: Path) -> list[Path]:
+    root = script_path.parent
+    return [
+        root / "venv" / "bin" / "python",
+        root / ".venv" / "bin" / "python",
+    ]
+
+
+def _runtime_probe_code(script_dir: Path) -> str:
+    return (
+        f"import sys; sys.path.insert(0, {str(script_dir)!r}); "
+        "import yaml; import motis_cli.config; import motis_cli.main"
+    )
+
+
+def _python_has_motis_runtime(python_path: Path, script_dir: Path) -> bool:
+    if not python_path.exists():
+        return False
+
+    try:
+        result = subprocess.run(
+            [str(python_path), "-c", _runtime_probe_code(script_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+
+    return result.returncode == 0
+
+
+def _bootstrap_local_env(script_path: Path) -> bool:
+    if os.environ.get(_BOOTSTRAP_SENTINEL) == "1":
+        return False
+
+    setup_script = script_path.parent / "setup-motis.sh"
+    if not setup_script.exists():
+        return False
+
+    print("Bootstrapping local Motis environment...", file=sys.stderr)
+    os.environ[_BOOTSTRAP_SENTINEL] = "1"
+    env = dict(os.environ)
+    completed = subprocess.run(
+        [str(setup_script)],
+        cwd=str(script_path.parent),
+        env=env,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _maybe_reexec_local_python(script_path: Path) -> None:
+    try:
+        current_python = Path(sys.executable).absolute()
+    except Exception:
+        current_python = None
+
+    for candidate in _local_python_paths(script_path):
+        if not candidate.exists():
+            continue
+        absolute_candidate = candidate.absolute()
+        if not _python_has_motis_runtime(absolute_candidate, script_path.parent):
+            continue
+        if current_python is not None and absolute_candidate == current_python:
+            return
+        os.execv(str(absolute_candidate), [str(absolute_candidate), str(script_path), *sys.argv[1:]])
+
+    if _bootstrap_local_env(script_path):
+        for candidate in _local_python_paths(script_path):
+            if not candidate.exists():
+                continue
+            absolute_candidate = candidate.absolute()
+            if not _python_has_motis_runtime(absolute_candidate, script_path.parent):
+                continue
+            if current_python is not None and absolute_candidate == current_python:
+                return
+            os.execv(str(absolute_candidate), [str(absolute_candidate), str(script_path), *sys.argv[1:]])
+
+
+def _ensure_current_runtime(script_path: Path) -> None:
+    current_python = Path(sys.executable).absolute()
+    if _python_has_motis_runtime(current_python, script_path.parent):
+        return
+
+    setup_script = script_path.parent / "setup-motis.sh"
+    if setup_script.exists():
+        raise SystemExit(
+            "Motis dependencies are not installed for this Python environment. "
+            f"Run {setup_script} and then retry."
+        )
+
+    raise SystemExit(
+        "Motis dependencies are not installed for this Python environment."
+    )
+
+
+def _prepare_runtime() -> None:
+    script_path = Path(__file__).resolve()
+    os.environ.setdefault("HERMES_HOME", str(Path.home() / ".motis"))
+    _maybe_reexec_local_python(script_path)
+    _ensure_current_runtime(script_path)
+
+
+if __name__ == "__main__":
+    _prepare_runtime()
+    from motis_cli.main import main
+    main()

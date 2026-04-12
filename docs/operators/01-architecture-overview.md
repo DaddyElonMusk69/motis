@@ -11,7 +11,9 @@
 Three design choices that shape everything:
 
 1. **Operators are autonomous agents.** Full import access. They can run independently of the
-   master agent, the platform, or any infrastructure beyond a Python process + API keys.
+   master agent, and in standalone mode they can run with nothing beyond a Python process +
+   API keys. In platform mode, however, their external networking and execution paths are
+   expected to flow through Motis MCP boundaries rather than talking to providers directly.
    Think "LangGraph agent before OpenClaw" — not a sandboxed script.
 
 2. **Risk management is baked in, not injected.** The platform does NOT inject guard nodes.
@@ -32,7 +34,8 @@ An operator is a **self-contained LangGraph StateGraph** that can:
 - Run deterministic computations (indicators, patterns, sizing)
 - Make LLM calls for reasoning (entry/exit decisions, market analysis)
 - Enforce its own risk limits (hard SL, position sizing caps, daily loss kill-switch)
-- Submit orders directly to exchanges
+- Submit orders through the Execution MCP on platform, or directly via exchange SDKs in standalone/dev
+- Spawn sub-agents that follow the same rule: external web/data access goes through MCP on platform
 - Run on a schedule, forever, with Redis-checkpointed state
 
 It is, in every meaningful sense, a standalone trading agent.

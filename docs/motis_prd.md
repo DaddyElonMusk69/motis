@@ -287,11 +287,11 @@ This means:
 - Research brief is **attached to backtest specs** — marketplace listings show the research thesis alongside verified performance
 
 **Operator states:**
-- `draft` — built, not yet backtested
-- `backtested` — has backtest results attached
-- `paper` — actively paper trading
-- `live` — actively live trading
-- `paused` — manually paused
+- `draft` — code generated, not yet validated
+- `validating` — Quality Gate running
+- `paper` — actively paper trading (all 5 blocker checks passed)
+- `live` — actively live trading (all 10 checks passed + user confirmation)
+- `paused` — halted (manual or kill-switch triggered)
 - `archived` — inactive
 - `complete` — for `BacktestOperator` and `ResearchOperator` on-demand runs
 
@@ -837,7 +837,7 @@ arena_badges (listing_id, competition_id, rank, aum_class, period)
 - [ ] Operator Builder: Master Agent conversation-to-operator flow (NL → LangGraph spec)
 - [ ] Operators sidebar in frontend (state badge, P&L, quick actions)
 - [ ] Operator detail view: graph visualization, trade log, run log stream
-- [ ] Exchange connections: Hyperliquid + Binance (migrated from existing project into `services/mcp/motis_mcp/execution/exchanges/`)
+- [ ] Exchange connections: Hyperliquid + Binance (migrated from existing project into `services/mcp/motis_execution_mcp/exchanges/`)
 - [ ] Operator run log streaming to frontend (explicit agent loop messages)
 
 **Milestone:** User can describe a strategy, have the agent build and backtest an Operator, and run it in paper trade mode.

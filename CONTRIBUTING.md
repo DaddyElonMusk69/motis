@@ -21,14 +21,20 @@ Suggested branch names:
 Before opening a PR, run the checks that apply to your change:
 
 ```bash
-./scripts/bootstrap-python.sh
+make bootstrap
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy packages/shared/motis_shared
-uv run mypy services/agent/motis_agent/operators
-uv run pytest --tb=short -q
+uv run mypy services/upstream/hermes_agent/motis_cli
+./.venv/bin/pytest -c pyproject.toml services/upstream/hermes_agent/tests --tb=short -q
 cd web && npm ci && npm run type-check && npm run lint
 ```
+
+If you change repo-root developer entrypoints, update the matching root docs and helpers together:
+
+- `README.md`
+- `Makefile`
+- `.env.example`
 
 Also update docs when behavior, architecture, or operator safety assumptions change.
 

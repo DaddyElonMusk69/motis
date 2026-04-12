@@ -203,11 +203,19 @@ class Conversation(TimestampMixin, Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String(255), nullable=True)   # Agent-generated title after first turn
+    source = Column(String(32), nullable=False, server_default="chat")
+    parent_conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     message_count = Column(Integer, nullable=False, server_default="0")
 
     # Relationships
     user = relationship("User", back_populates="conversations")
     messages = relationship("ConversationMessage", back_populates="conversation", cascade="all, delete-orphan")
+    parent_conversation = relationship("Conversation", remote_side=[id], backref="child_conversations")
 
 
 class ConversationMessage(Base):
@@ -226,6 +234,10 @@ class ConversationMessage(Base):
     # OpenAI tool_calls array if role='assistant', tool_call_id if role='tool'
     tool_calls = Column(JSONB, nullable=True)
     tool_call_id = Column(String(64), nullable=True)
+    finish_reason = Column(String(32), nullable=True)
+    reasoning = Column(Text, nullable=True)
+    reasoning_details = Column(JSONB, nullable=True)
+    codex_reasoning_items = Column(JSONB, nullable=True)
     # Position in conversation
     sequence = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

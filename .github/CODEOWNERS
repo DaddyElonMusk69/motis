@@ -5,5 +5,5 @@
 
 # Architecture-critical files require explicit review
 docs/motis_prd.md                              @DaddyElonMusk69
-packages/operator_sdk/motis_operator/base.py   @DaddyElonMusk69
+services/motis_agent/core/operator_base.py @DaddyElonMusk69
 services/mcp/motis_mcp/execution/risk_guard.py @DaddyElonMusk69

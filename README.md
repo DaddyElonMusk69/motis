@@ -1,50 +1,73 @@
 # Motis
 
-> Agentic trading platform — from idea to live, verified operator in one conversation.
+> Finance- and trading-oriented AI agent platform.
 
-## Architecture
+## Repo Map
 
 ```
 Motis/
 ├── packages/
-│   ├── shared/          # Pydantic models, types, utils (shared across all services)
-│   └── operator_sdk/    # LangGraph OperatorBase + state primitives
+│   └── shared/          # Pydantic models, types, utils (shared across all services)
 ├── services/
-│   ├── agent/           # Master agent (Hermes fork, multi-user, SSE streaming)
-│   │   └── motis_agent/
-│   │       ├── core/           # Agentic loop, memory, skill registry
-│   │       ├── skills/finance/ # 68+ finance skills (absorbed from Vibe-Trading)
-│   │       └── swarms/         # Multi-agent research teams (29 presets)
-│   ├── mcp/             # MCP tool server (execution chokepoint + market data)
-│   └── platform/        # API gateway + operator runtime (Celery) + arena + marketplace
-├── web/                 # Next.js frontend
-├── infra/               # docker-compose, k8s
-├── scripts/             # Dev tooling
-└── docs/                # PRD, ADRs, diagrams
+│   ├── motis_agent/        # Master agent runtime, local CLI, skills, operators
+│   ├── mcp/                # Data, execution, and operator MCP boundaries
+│   ├── platform/           # Platform API, DB schema, and runtime scaffolding
+│   └── upstream/           # Imported source material being folded into Motis
+├── web/                    # Next.js frontend
+├── infra/                  # Containerized stack definitions
+├── scripts/                # Bootstrap, smoke, and import helpers
+└── docs/                   # PRD, operator docs, architecture notes
 ```
+
+## Current Local Workflow
+
+The repo-root commands are centered on the Motis surfaces that are already in use:
+
+- bootstrapping the Python workspace
+- starting local Postgres and Redis
+- running the Motis agent service and CLI
+- running the checked-in test suite
 
 ## Quick Start
 
 ```bash
-cp .env.example .env
-# Edit .env with your API keys
-./scripts/dev.sh
+make bootstrap
+cp services/motis_agent/.env.example services/motis_agent/.env
+# Add your OpenAI-compatible provider settings to services/motis_agent/.env
+make up
+make db-migrate
+make agent
 ```
 
-Services:
-- **Web:** http://localhost:3000
-- **Platform API:** http://localhost:8000
-- **Agent:** http://localhost:8001 (internal)
-- **MCP:** http://localhost:8002 (internal)
+In another terminal:
+
+```bash
+make chat
+```
+
+The repo-root `.env.example` is kept for shared workspace settings and container-oriented workflows. For day-to-day agent work, the most important local defaults live in `services/motis_agent/.env.example`.
 
 ## Development
 
 ```bash
-# Install Python workspace (uv)
-uv sync
+# Bootstrap or refresh the workspace
+make bootstrap
 
-# Run a single service
-cd services/agent && uvicorn motis_agent.server:app --reload
+# Start local infrastructure
+make up
+
+# Apply platform migrations
+make db-migrate
+
+# Run the Motis agent service
+make agent
+
+# Run the local CLI
+make chat
+
+# Browse or resume local CLI conversations
+.venv/bin/motis-chat --list-sessions
+.venv/bin/motis-chat --resume latest
 
 # Run tests
 uv run pytest
@@ -55,5 +78,9 @@ Workflow: open feature branches and send PRs into `main`. We are using a trunk-b
 ## Docs
 
 - [PRD](docs/motis_prd.md)
-- [Architecture Research](docs/motis_architecture_research.md)
+- [Architecture Research](docs/design/01-architecture-research.md)
+- [Operator Architecture](docs/operators/01-architecture-overview.md)
+- [Operator Configuration](docs/operators/05-configuration-guide.md)
+- [MCP Strategy](docs/architecture/motis_mcp_strategy.md)
+- [Motis Agent Service](services/motis_agent/README.md)
 - [Contributing](CONTRIBUTING.md)
